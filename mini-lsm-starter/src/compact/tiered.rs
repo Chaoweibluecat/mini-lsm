@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{ Deserialize, Serialize };
 
 use crate::lsm_storage::LsmStorageState;
 
@@ -28,7 +28,7 @@ impl TieredCompactionController {
 
     pub fn generate_compaction_task(
         &self,
-        _snapshot: &LsmStorageState,
+        _snapshot: &LsmStorageState
     ) -> Option<TieredCompactionTask> {
         unimplemented!()
     }
@@ -37,7 +37,7 @@ impl TieredCompactionController {
         &self,
         _snapshot: &LsmStorageState,
         _task: &TieredCompactionTask,
-        _output: &[usize],
+        _output: &[usize]
     ) -> (LsmStorageState, Vec<usize>) {
         unimplemented!()
     }

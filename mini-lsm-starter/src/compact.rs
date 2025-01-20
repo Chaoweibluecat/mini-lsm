@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{ Ok, Result };
+use bytes::BufMut;
 pub use leveled::{ LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask };
 use serde::{ Deserialize, Serialize };
 pub use simple_leveled::{
@@ -151,6 +152,7 @@ impl LsmStorageInner {
         l0_sstables: &Vec<usize>,
         l1_sstables: &Vec<usize>
     ) -> Result<Vec<Arc<SsTable>>> {
+        // todo remove file
         let mut vec: Vec<usize> = Vec::with_capacity(l0_sstables.len() + l1_sstables.len());
         vec.extend(l0_sstables);
         vec.extend(l1_sstables);
@@ -267,10 +269,29 @@ impl LsmStorageInner {
             None => Ok(()),
             Some(task) => {
                 let result = self.compact(&task)?;
-                for sst in result {
-                    snapshot.sstables.insert(sst.sst_id(), sst);
+                let mut output: Vec<usize> = vec![];
+                // lock state,确保这段时间只有自己写state的指针
+                let state_mutex = self.state_lock.lock();
+                // 需要重读并clone,(state是cow的, l0 flush会导致指针更新)
+                let mut clone = self.state.read().as_ref().clone();
+                for sst in &result {
+                    clone.sstables.insert(sst.sst_id(), sst.clone());
+                    output.push(sst.sst_id());
                 }
-                self.compaction_controller.apply_compaction_result(&snapshot)
+                let (state, deleted) = self.compaction_controller.apply_compaction_result(
+                    &clone,
+                    &task,
+                    &output,
+                    false
+                );
+                let mut ref1 = self.state.write();
+                *ref1 = Arc::new(state);
+                drop(state_mutex);
+
+                for delete_f in deleted {
+                    std::fs::remove_file(self.path_of_sst(delete_f));
+                }
+                Ok(())
             }
         }
     }
