@@ -1,12 +1,13 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
 use std::collections::HashMap;
-use std::ops::Bound;
+use std::ops::{Bound, DerefMut};
 use std::path::{Path, PathBuf};
+use std::ptr::read;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Ok, Result};
 use bytes::Bytes;
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
@@ -15,11 +16,16 @@ use crate::compact::{
     CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
     SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
 };
+use crate::iterators::concat_iterator::SstConcatIterator;
+use crate::iterators::merge_iterator::MergeIterator;
+use crate::iterators::two_merge_iterator::TwoMergeIterator;
+use crate::iterators::StorageIterator;
+use crate::key::{self, KeySlice};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::Manifest;
-use crate::mem_table::MemTable;
+use crate::mem_table::{map_bound, MemTable, MemTableIterator};
 use crate::mvcc::LsmMvccInner;
-use crate::table::SsTable;
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -154,7 +160,8 @@ impl Drop for MiniLsm {
 
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
-        unimplemented!()
+        self.flush_notifier.send(())?;
+        Ok(())
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -279,7 +286,65 @@ impl LsmStorageInner {
 
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get(&self, _key: &[u8]) -> Result<Option<Bytes>> {
-        unimplemented!()
+        // memtable本身是lock-free的,但是这里首先还是需要获取state的读锁,
+        // 因为这把读锁守护state内部,state内的memtable引用指向谁都是可变的；
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+        let mut cur_ref = Some(snapshot.memtable.clone());
+        let mut i = 0;
+        while let Some(memtable) = cur_ref {
+            match memtable.get(_key) {
+                None => {
+                    cur_ref = snapshot.imm_memtables.get(i).cloned();
+                    i = i + 1;
+                }
+                Some(bytes) => {
+                    if bytes.is_empty() {
+                        return Ok(None);
+                    } else {
+                        return Ok(Some(bytes));
+                    }
+                }
+            }
+        }
+
+        // 创建l0sstable的mergeIter(可以优化,理论上来说是有多余IO);SsTableIterator::create_and_seek_to_key都至少会读一个块（因为要读block）
+        // 创建的SsTableIterator都seek到第一个>= _key的key
+        // 1. mergeIter非法,说明key太大了
+        // 2. mergeIter.key (代表所有sstable中>=_key的最小key) > _key ; 说明没有这个key
+        // 3. key match,兼容删除场景即可
+        let mut sstable_iter = Vec::with_capacity(snapshot.l0_sstables.len());
+        for i in snapshot.l0_sstables.iter() {
+            let table = snapshot.sstables.get(i).unwrap().clone();
+            let iter = Box::new(SsTableIterator::create_and_seek_to_key(
+                table,
+                KeySlice::from_slice(_key),
+            )?);
+            sstable_iter.push(iter);
+        }
+
+        let l1_ssts = snapshot.levels[0]
+            .1
+            .iter()
+            .map(|id| snapshot.sstables.get(id).unwrap().clone())
+            .collect();
+        let l1_iter =
+            SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(_key))?;
+
+        let merge_iter = TwoMergeIterator::create(MergeIterator::create(sstable_iter), l1_iter)?;
+        if !merge_iter.is_valid() {
+            return Ok(None);
+        }
+        if merge_iter.key() > KeySlice::from_slice(_key) {
+            return Ok(None);
+        }
+        return if merge_iter.value().is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(Bytes::copy_from_slice(merge_iter.value())))
+        };
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
@@ -289,12 +354,42 @@ impl LsmStorageInner {
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, _key: &[u8], _value: &[u8]) -> Result<()> {
-        unimplemented!()
+        let guard = self.state.read();
+        let size = {
+            guard.memtable.put(_key, _value)?;
+            guard.memtable.approximate_size()
+        };
+        drop(guard);
+        if size > self.options.target_sst_size {
+            let state_lock = self.state_lock.lock();
+            // 进同步块以后state rwlock本身守护的对memtable的引用可能变了, 需要重新获取引用
+            let guard = self.state.read();
+            if guard.memtable.approximate_size() > self.options.target_sst_size {
+                drop(guard);
+                self.force_freeze_memtable(&state_lock)?;
+            }
+        }
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, _key: &[u8]) -> Result<()> {
-        unimplemented!()
+        let guard = self.state.read();
+        let size = {
+            guard.memtable.put(_key, &[])?;
+            guard.memtable.approximate_size()
+        };
+        drop(guard);
+        if size > self.options.target_sst_size {
+            let state_lock = self.state_lock.lock();
+            // 进同步块以后state rwlock本身守护的对memtable的引用可能变了, 需要重新获取引用
+            let guard = self.state.read();
+            if guard.memtable.approximate_size() > self.options.target_sst_size {
+                drop(guard);
+                self.force_freeze_memtable(&state_lock)?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
@@ -316,15 +411,47 @@ impl LsmStorageInner {
     pub(super) fn sync_dir(&self) -> Result<()> {
         unimplemented!()
     }
-
     /// Force freeze the current memtable to an immutable memtable
     pub fn force_freeze_memtable(&self, _state_lock_observer: &MutexGuard<'_, ()>) -> Result<()> {
-        unimplemented!()
+        // 1.创建新的memtable
+        let new_memtable = MemTable::create(self.next_sst_id());
+        // 获取state的写锁
+        let mut state = self.state.write();
+        // 因为拿的是state的读锁,这里需要clone后才能写state的字段,（不能直接insert!,rc不能直接写）
+        let mut snap = state.as_ref().clone();
+        snap.imm_memtables.insert(0, snap.memtable);
+        snap.memtable = Arc::new(new_memtable);
+        // 将cow后的state作为最新的读写锁保护的引用
+        *state = Arc::new(snap);
+        drop(state);
+        Ok(())
     }
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
-        unimplemented!()
+        // 1.读出last memtable
+        let last_mmt = {
+            let read1 = self.state.read();
+            read1.imm_memtables.last().unwrap().clone()
+        };
+
+        // write sst
+        let mut builder: SsTableBuilder = SsTableBuilder::new(self.options.target_sst_size);
+        last_mmt.flush(&mut builder)?;
+        let id = last_mmt.id();
+        let ss_table =
+            Arc::new(builder.build(id, Some(self.block_cache.clone()), self.path_of_sst(id))?);
+
+        // 删除memtable, cow更新state
+        let mut write_guard = self.state.write();
+        let mut snap = write_guard.as_ref().clone();
+        snap.imm_memtables.pop();
+        snap.l0_sstables.insert(0, ss_table.sst_id());
+        snap.sstables.insert(ss_table.sst_id(), ss_table);
+        // 将cow后的state作为最新的读写锁保护的引用
+        *write_guard = Arc::new(snap);
+        drop(write_guard);
+        Ok(())
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -332,12 +459,102 @@ impl LsmStorageInner {
         Ok(())
     }
 
+    pub fn out_bound(table: Arc<SsTable>, _lower: Bound<&[u8]>, _upper: Bound<&[u8]>) -> bool {
+        // 查询区间最大值小于ss_table最小值
+        let first = table.first_key();
+        let smaller_than_min = match _upper {
+            Bound::Unbounded => false,
+            Bound::Included(k) => k < first.raw_ref(),
+            Bound::Excluded(k) => k <= first.raw_ref(),
+        };
+
+        // 区间最小值大于ss_table最大值
+        let last = table.last_key();
+
+        let greater_than_max = match _lower {
+            Bound::Unbounded => false,
+            Bound::Included(k) => k > last.raw_ref(),
+            Bound::Excluded(k) => k >= last.raw_ref(),
+        };
+        return smaller_than_min || greater_than_max;
+    }
     /// Create an iterator over a range of keys.
     pub fn scan(
         &self,
         _lower: Bound<&[u8]>,
         _upper: Bound<&[u8]>,
     ) -> Result<FusedIterator<LsmIterator>> {
-        unimplemented!()
+        let snapshot = {
+            let guard = self.state.read();
+            Arc::clone(&guard)
+        };
+
+        let cur = Box::new(snapshot.memtable.scan(_lower, _upper));
+        let mut memtable_iter: Vec<Box<MemTableIterator>> = snapshot
+            .imm_memtables
+            .iter()
+            .map(|table| Box::new(table.scan(_lower, _upper)))
+            .collect();
+        memtable_iter.insert(0, cur);
+
+        let mut sstable_iter: Vec<Box<SsTableIterator>> =
+            Vec::with_capacity(snapshot.l0_sstables.capacity());
+        for i in snapshot.l0_sstables.iter() {
+            let table = snapshot.sstables.get(i).unwrap().clone();
+            if Self::out_bound(table.clone(), _lower, _upper) {
+                continue;
+            }
+            let iter = match _lower {
+                Bound::Included(lower) => Box::new(SsTableIterator::create_and_seek_to_key(
+                    table,
+                    KeySlice::from_slice(lower),
+                )?),
+                Bound::Excluded(lower) => {
+                    let mut iter = Box::new(SsTableIterator::create_and_seek_to_key(
+                        table,
+                        KeySlice::from_slice(lower),
+                    )?);
+                    while iter.is_valid() && iter.key() == KeySlice::from_slice(lower) {
+                        iter.next()?;
+                    }
+                    iter
+                }
+                _ => Box::new(SsTableIterator::create_and_seek_to_first(table)?),
+            };
+            sstable_iter.push(iter);
+        }
+        let two = TwoMergeIterator::create(
+            MergeIterator::create(memtable_iter),
+            MergeIterator::create(sstable_iter),
+        )?;
+
+        // 处理l1
+        let l1_ssts = snapshot.levels[0]
+            .1
+            .iter()
+            .map(|id| snapshot.sstables.get(id).unwrap().clone())
+            .collect();
+        let l1_iter = match _lower {
+            Bound::Included(lower) => {
+                SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(lower))?
+            }
+            Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(l1_ssts)?,
+            Bound::Excluded(lower) => {
+                let mut iter = SstConcatIterator::create_and_seek_to_key(
+                    l1_ssts,
+                    KeySlice::from_slice(lower),
+                )?;
+                while iter.is_valid() && iter.key().raw_ref() == lower {
+                    iter.next()?;
+                }
+                iter
+            }
+        };
+        let inner_iter = TwoMergeIterator::create(two, l1_iter)?;
+
+        // 这里是拷贝，否则数组引用逃逸出方法体
+        let bytes = _upper.map(|slice| Bytes::copy_from_slice(slice));
+        let iter = FusedIterator::new(LsmIterator::new(inner_iter, bytes)?);
+        Ok(iter)
     }
 }

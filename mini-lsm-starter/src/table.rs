@@ -6,16 +6,18 @@ mod builder;
 mod iterator;
 
 use std::fs::File;
+use std::io::{Read, Seek};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Ok, Result};
 pub use builder::SsTableBuilder;
-use bytes::Buf;
+use bytes::{Buf, BufMut, Bytes};
 pub use iterator::SsTableIterator;
 
 use crate::block::Block;
-use crate::key::{KeyBytes, KeySlice};
+use crate::key::{self, KeyBytes, KeySlice};
 use crate::lsm_storage::BlockCache;
 
 use self::bloom::Bloom;
@@ -39,12 +41,36 @@ impl BlockMeta {
         #[allow(clippy::ptr_arg)] // remove this allow after you finish
         buf: &mut Vec<u8>,
     ) {
-        unimplemented!()
+        if block_meta.len() == 0 {
+            return;
+        }
+        buf.put_u16(block_meta.len() as u16);
+        for meta in block_meta.iter() {
+            buf.put_u32(meta.offset as u32);
+            buf.put_u16(meta.first_key.len() as u16);
+            buf.extend(meta.first_key.as_key_slice().raw_ref());
+            buf.put_u16(meta.last_key.len() as u16);
+            buf.extend(meta.last_key.as_key_slice().raw_ref());
+        }
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(buf: impl Buf) -> Vec<BlockMeta> {
-        unimplemented!()
+    pub fn decode_block_meta(mut buf: impl Buf) -> Vec<BlockMeta> {
+        let meta_len: u16 = buf.get_u16();
+        let mut ret = Vec::with_capacity(meta_len as usize);
+        for i in 0..meta_len {
+            let offset = buf.get_u32() as usize;
+            let first_key_len = buf.get_u16();
+            let first_key = KeyBytes::from_bytes(buf.copy_to_bytes(first_key_len as usize));
+            let last_key_len = buf.get_u16();
+            let last_key = KeyBytes::from_bytes(buf.copy_to_bytes(last_key_len as usize));
+            ret.push(BlockMeta {
+                offset,
+                first_key,
+                last_key,
+            });
+        }
+        ret
     }
 }
 
@@ -108,7 +134,32 @@ impl SsTable {
 
     /// Open SSTable from a file.
     pub fn open(id: usize, block_cache: Option<Arc<BlockCache>>, file: FileObject) -> Result<Self> {
-        unimplemented!()
+        let content = file.read(0, file.size())?;
+
+        let bloom_offset = (&content[content.len() - 4..]).get_u32() as usize;
+
+        let bloom = if bloom_offset != content.len() - 4 {
+            Some(Bloom::decode(&content[bloom_offset..content.len() - 4])?)
+        } else {
+            None
+        };
+
+        let meta_offset = (&content[bloom_offset - 4..]).get_u32() as usize;
+        let block_meta = BlockMeta::decode_block_meta(&content[meta_offset..bloom_offset - 4]);
+
+        let first_key = block_meta[0].first_key.clone();
+        let last_key = block_meta.last().unwrap().last_key.clone();
+        Ok(SsTable {
+            file,
+            block_meta,
+            block_meta_offset: meta_offset,
+            id,
+            block_cache: None,
+            first_key,
+            last_key,
+            bloom,
+            max_ts: 0,
+        })
     }
 
     /// Create a mock SST with only first key + last key metadata
@@ -133,19 +184,40 @@ impl SsTable {
 
     /// Read a block from the disk.
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        // 通过blockmeta中的当前block和下一段的block offset 确定读出的位置
+        let offset = self.block_meta[block_idx].offset;
+        let end = self
+            .block_meta
+            .get(block_idx + 1)
+            .map_or(self.block_meta_offset as usize, |meta| meta.offset);
+        let len = end - offset;
+        let block_data = self.file.read(offset as u64, len as u64)?;
+        Ok(Arc::new(Block::decode(&block_data)))
     }
 
     /// Read a block from disk, with block cache. (Day 4)
     pub fn read_block_cached(&self, block_idx: usize) -> Result<Arc<Block>> {
-        unimplemented!()
+        if self.block_cache.is_some() {
+            let block = self
+                .block_cache
+                .as_ref()
+                .unwrap()
+                .try_get_with((self.id, block_idx), || self.read_block(block_idx));
+            // anyhow返回anyhow::Error, bail返回的是一个Result
+            block.map_err(|e| anyhow!(format!("{}", e)))
+        } else {
+            self.read_block(block_idx)
+        }
     }
 
     /// Find the block that may contain `key`.
     /// Note: You may want to make use of the `first_key` stored in `BlockMeta`.
     /// You may also assume the key-value pairs stored in each consecutive block are sorted.
     pub fn find_block_idx(&self, key: KeySlice) -> usize {
-        unimplemented!()
+        // 牛大了,什么api大王
+        self.block_meta
+            .partition_point(|meta| meta.first_key.as_key_slice() <= key)
+            .saturating_sub(1) // pp返回的是第二个分区的第一个idx,(即第一个大于key的block_idx),此时需要-1
     }
 
     /// Get number of data blocks.

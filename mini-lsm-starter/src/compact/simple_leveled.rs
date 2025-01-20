@@ -1,6 +1,12 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
-use crate::lsm_storage::LsmStorageState;
+use crate::{
+    iterators::{concat_iterator::SstConcatIterator, merge_iterator::MergeIterator, two_merge_iterator::TwoMergeIterator, StorageIterator},
+    lsm_storage::LsmStorageState,
+    table::{SsTable, SsTableIterator},
+};
 
 #[derive(Debug, Clone)]
 pub struct SimpleLeveledCompactionOptions {
@@ -35,7 +41,43 @@ impl SimpleLeveledCompactionController {
         &self,
         _snapshot: &LsmStorageState,
     ) -> Option<SimpleLeveledCompactionTask> {
-        unimplemented!()
+        if _snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
+            Some(SimpleLeveledCompactionTask {
+                upper_level: None,
+                upper_level_sst_ids: _snapshot.l0_sstables.clone(),
+                lower_level: 1,
+                lower_level_sst_ids: _snapshot.levels[0].1.clone(),
+                is_lower_level_bottom_level: false,
+            })
+        } else {
+            let mut i = 0;
+            let level = loop {
+                // i = base层
+                if i == self.options.max_levels {
+                    break None;
+                }
+                if _snapshot.levels[i].1.is_empty() {
+                    i = i + 1;
+                    continue;
+                }
+                let ratio =
+                    _snapshot.levels[i + 1].1.len() as f64 / _snapshot.levels[i].1.len() as f64;
+                if ratio < self.options.size_ratio_percent as f64 / 100.0 {
+                    break Some(i);
+                }
+                i = i + 1;
+            };
+            match level {
+                None => None,
+                Some(i) => Some(SimpleLeveledCompactionTask {
+                    upper_level: Some(i + 1),
+                    upper_level_sst_ids: _snapshot.levels[i].1.clone(),
+                    lower_level: i + 2,
+                    lower_level_sst_ids: _snapshot.levels[i + 1].1.clone(),
+                    is_lower_level_bottom_level: i + 1 == self.options.max_levels,
+                }),
+            }
+        }
     }
 
     /// Apply the compaction result.
@@ -51,6 +93,32 @@ impl SimpleLeveledCompactionController {
         _task: &SimpleLeveledCompactionTask,
         _output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
-        unimplemented!()
+        let lower: Vec<Arc<SsTable>> = _task
+            .lower_level_sst_ids
+            .iter()
+            .map(|id| _snapshot.sstables.get(id).unwrap().clone())
+            .collect();
+
+        let upper: Vec<Arc<SsTable>> = _task
+            .upper_level_sst_ids
+            .iter()
+            .map(|id| _snapshot.sstables.get(id).unwrap().clone())
+            .collect();
+
+        let two : (dyn Sz) = if _task.upper_level.is_none() {
+            let l0 = upper
+                .iter()
+                .map(|sst| {
+                    Box::new(SsTableIterator::create_and_seek_to_first(sst.clone()).expect("fail to generate sst iter"))
+                })
+                .collect();
+            let l0_iter=  MergeIterator::create(l0);
+            let l1_iter: SstConcatIterator = SstConcatIterator::create_and_seek_to_first(lower).expect("fail to generate l1 sst iter");
+            (l0_iter, l1_iter)
+        } else {
+            let upper_iter = SstConcatIterator::create_and_seek_to_first(upper).expect("fail to generate l1 sst iter");
+            let lower_iter = SstConcatIterator::create_and_seek_to_first(lower).expect("fail to generate l1 sst iter");
+            (upper_iter, lower_iter)
+        }
     }
 }

@@ -1,7 +1,9 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use std::sync::Arc;
+use std::{cmp::Ordering, sync::Arc};
+
+use bytes::Buf;
 
 use crate::key::{KeySlice, KeyVec};
 
@@ -34,44 +36,90 @@ impl BlockIterator {
 
     /// Creates a block iterator and seek to the first entry.
     pub fn create_and_seek_to_first(block: Arc<Block>) -> Self {
-        unimplemented!()
+        let mut iter = BlockIterator::new(block.clone());
+        if block.offsets.is_empty() {
+            return iter;
+        }
+        iter.seek_to_first();
+        iter
     }
 
     /// Creates a block iterator and seek to the first key that >= `key`.
     pub fn create_and_seek_to_key(block: Arc<Block>, key: KeySlice) -> Self {
-        unimplemented!()
+        let mut iter = BlockIterator::new(block.clone());
+        if block.offsets.is_empty() {
+            return iter;
+        }
+        iter.seek_to_key(key);
+        iter
     }
 
     /// Returns the key of the current entry.
     pub fn key(&self) -> KeySlice {
-        unimplemented!()
+        KeySlice::from_slice(self.key.raw_ref())
     }
 
     /// Returns the value of the current entry.
     pub fn value(&self) -> &[u8] {
-        unimplemented!()
+        &self.block.data[self.value_range.0..self.value_range.1]
     }
 
     /// Returns true if the iterator is valid.
     /// Note: You may want to make use of `key`
     pub fn is_valid(&self) -> bool {
-        unimplemented!()
+        !self.key.is_empty()
     }
 
     /// Seeks to the first key in the block.
     pub fn seek_to_first(&mut self) {
-        unimplemented!()
+        // 幂等api,调用后重置idx,并根据idx设置iter的其他暂存属性
+        self.idx = 0;
+        self.set_by_idx();
     }
 
     /// Move to the next key in the block.
     pub fn next(&mut self) {
-        unimplemented!()
+        self.seek_next();
     }
 
     /// Seek to the first key that >= `key`.
     /// Note: You should assume the key-value pairs in the block are sorted when being added by
     /// callers.
     pub fn seek_to_key(&mut self, key: KeySlice) {
-        unimplemented!()
+        // 简单期间,从0开始,向右遍历直到找到一个不小于key的 block_key
+        self.seek_to_first();
+        while self.is_valid() && key.raw_ref().cmp(self.key.raw_ref()) == Ordering::Greater {
+            self.seek_next();
+        }
+    }
+
+    // set current value range and key by current idx,needs to be called whenever there's a idx update
+    fn set_by_idx(&mut self) {
+        // idx太大,通过清空key的方式反馈iter已经非法
+        if self.idx >= self.block.offsets.len() {
+            self.key.clear();
+            return;
+        }
+        let key_offset: u16 = self.block.offsets[self.idx];
+        let key_len = (&self.block.data[key_offset as usize..]).get_u16();
+        let key_start = key_offset + 2;
+        let key_end: u16 = key_start + key_len;
+        let key_slice = &self.block.data[key_start as usize..key_end as usize];
+        let value_len = (&self.block.data[key_end as usize..]).get_u16();
+        let value_start = key_end + 2;
+        let value_end = value_start + value_len;
+        self.value_range = (value_start as usize, value_end as usize);
+        if self.idx == 0 {
+            self.first_key.clear();
+            self.first_key.append(key_slice);
+        }
+        self.key.clear();
+        self.key.append(key_slice);
+    }
+
+    fn seek_next(&mut self) {
+        self.idx = self.idx + 1;
+        // 设置为next
+        self.set_by_idx();
     }
 }

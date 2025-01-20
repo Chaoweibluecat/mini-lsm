@@ -72,12 +72,22 @@ impl Bloom {
     /// Build bloom filter from key hashes
     pub fn build_from_key_hashes(keys: &[u32], bits_per_key: usize) -> Self {
         let k = (bits_per_key as f64 * 0.69) as u32;
-        let k = k.clamp(1, 30);
+        let k: u32 = k.clamp(1, 30);
         let nbits = (keys.len() * bits_per_key).max(64);
         let nbytes = (nbits + 7) / 8;
         let nbits = nbytes * 8;
         let mut filter = BytesMut::with_capacity(nbytes);
         filter.resize(nbytes, 0);
+
+        for h in keys {
+            let mut h = *h;
+            let delta = (h >> 17) | (h << 15); // h is the key hash
+            for _ in 0..k {
+                let bit_num = h as usize % nbits;
+                filter.set_bit(bit_num, true);
+                h = h.wrapping_add(delta);
+            }
+        }
 
         // TODO: build the bloom filter
 
@@ -94,7 +104,15 @@ impl Bloom {
             true
         } else {
             let nbits = self.filter.bit_len();
-            let delta = h.rotate_left(15);
+            let mut h = h;
+            let delta = (h >> 17) | (h << 15);
+            for _ in 0..self.k {
+                let bit_num = h as usize % nbits;
+                if self.filter.get_bit(bit_num) == false {
+                    return false;
+                }
+                h = h.wrapping_add(delta);
+            }
 
             // TODO: probe the bloom filter
 
