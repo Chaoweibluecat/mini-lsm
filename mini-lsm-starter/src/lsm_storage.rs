@@ -1,31 +1,36 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
 use std::collections::HashMap;
-use std::ops::{Bound, DerefMut};
-use std::path::{Path, PathBuf};
+use std::ops::{ Bound, DerefMut };
+use std::path::{ Path, PathBuf };
 use std::ptr::read;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anyhow::{Ok, Result};
+use anyhow::{ Ok, Result };
 use bytes::Bytes;
-use parking_lot::{Mutex, MutexGuard, RwLock};
+use parking_lot::{ Mutex, MutexGuard, RwLock };
 
 use crate::block::Block;
 use crate::compact::{
-    CompactionController, CompactionOptions, LeveledCompactionController, LeveledCompactionOptions,
-    SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, TieredCompactionController,
+    CompactionController,
+    CompactionOptions,
+    LeveledCompactionController,
+    LeveledCompactionOptions,
+    SimpleLeveledCompactionController,
+    SimpleLeveledCompactionOptions,
+    TieredCompactionController,
 };
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
-use crate::key::{self, KeySlice};
-use crate::lsm_iterator::{FusedIterator, LsmIterator};
+use crate::key::{ self, KeySlice };
+use crate::lsm_iterator::{ FusedIterator, LsmIterator };
 use crate::manifest::Manifest;
-use crate::mem_table::{map_bound, MemTable, MemTableIterator};
+use crate::mem_table::{ map_bound, MemTable, MemTableIterator };
 use crate::mvcc::LsmMvccInner;
-use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
+use crate::table::{ SsTable, SsTableBuilder, SsTableIterator };
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -53,11 +58,9 @@ pub enum WriteBatchRecord<T: AsRef<[u8]>> {
 impl LsmStorageState {
     fn create(options: &LsmStorageOptions) -> Self {
         let levels = match &options.compaction_options {
-            CompactionOptions::Leveled(LeveledCompactionOptions { max_levels, .. })
-            | CompactionOptions::Simple(SimpleLeveledCompactionOptions { max_levels, .. }) => (1
-                ..=*max_levels)
-                .map(|level| (level, Vec::new()))
-                .collect::<Vec<_>>(),
+            | CompactionOptions::Leveled(LeveledCompactionOptions { max_levels, .. })
+            | CompactionOptions::Simple(SimpleLeveledCompactionOptions { max_levels, .. }) =>
+                (1..=*max_levels).map(|level| (level, Vec::new())).collect::<Vec<_>>(),
             CompactionOptions::Tiered(_) => Vec::new(),
             CompactionOptions::NoCompaction => vec![(1, Vec::new())],
         };
@@ -172,13 +175,15 @@ impl MiniLsm {
         let compaction_thread = inner.spawn_compaction_thread(rx)?;
         let (tx2, rx) = crossbeam_channel::unbounded();
         let flush_thread = inner.spawn_flush_thread(rx)?;
-        Ok(Arc::new(Self {
-            inner,
-            flush_notifier: tx2,
-            flush_thread: Mutex::new(flush_thread),
-            compaction_notifier: tx1,
-            compaction_thread: Mutex::new(compaction_thread),
-        }))
+        Ok(
+            Arc::new(Self {
+                inner,
+                flush_notifier: tx2,
+                flush_thread: Mutex::new(flush_thread),
+                compaction_notifier: tx1,
+                compaction_thread: Mutex::new(compaction_thread),
+            })
+        )
     }
 
     pub fn new_txn(&self) -> Result<()> {
@@ -212,7 +217,7 @@ impl MiniLsm {
     pub fn scan(
         &self,
         lower: Bound<&[u8]>,
-        upper: Bound<&[u8]>,
+        upper: Bound<&[u8]>
     ) -> Result<FusedIterator<LsmIterator>> {
         self.inner.scan(lower, upper)
     }
@@ -220,8 +225,7 @@ impl MiniLsm {
     /// Only call this in test cases due to race conditions
     pub fn force_flush(&self) -> Result<()> {
         if !self.inner.state.read().memtable.is_empty() {
-            self.inner
-                .force_freeze_memtable(&self.inner.state_lock.lock())?;
+            self.inner.force_freeze_memtable(&self.inner.state_lock.lock())?;
         }
         if !self.inner.state.read().imm_memtables.is_empty() {
             self.inner.force_flush_next_imm_memtable()?;
@@ -236,8 +240,7 @@ impl MiniLsm {
 
 impl LsmStorageInner {
     pub(crate) fn next_sst_id(&self) -> usize {
-        self.next_sst_id
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        self.next_sst_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
@@ -253,9 +256,10 @@ impl LsmStorageInner {
             CompactionOptions::Tiered(options) => {
                 CompactionController::Tiered(TieredCompactionController::new(options.clone()))
             }
-            CompactionOptions::Simple(options) => CompactionController::Simple(
-                SimpleLeveledCompactionController::new(options.clone()),
-            ),
+            CompactionOptions::Simple(options) =>
+                CompactionController::Simple(
+                    SimpleLeveledCompactionController::new(options.clone())
+                ),
             CompactionOptions::NoCompaction => CompactionController::NoCompaction,
         };
 
@@ -318,20 +322,20 @@ impl LsmStorageInner {
         let mut sstable_iter = Vec::with_capacity(snapshot.l0_sstables.len());
         for i in snapshot.l0_sstables.iter() {
             let table = snapshot.sstables.get(i).unwrap().clone();
-            let iter = Box::new(SsTableIterator::create_and_seek_to_key(
-                table,
-                KeySlice::from_slice(_key),
-            )?);
+            let iter = Box::new(
+                SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(_key))?
+            );
             sstable_iter.push(iter);
         }
 
-        let l1_ssts = snapshot.levels[0]
-            .1
+        let l1_ssts = snapshot.levels[0].1
             .iter()
             .map(|id| snapshot.sstables.get(id).unwrap().clone())
             .collect();
-        let l1_iter =
-            SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(_key))?;
+        let l1_iter = SstConcatIterator::create_and_seek_to_key(
+            l1_ssts,
+            KeySlice::from_slice(_key)
+        )?;
 
         let merge_iter = TwoMergeIterator::create(MergeIterator::create(sstable_iter), l1_iter)?;
         if !merge_iter.is_valid() {
@@ -439,14 +443,19 @@ impl LsmStorageInner {
         let mut builder: SsTableBuilder = SsTableBuilder::new(self.options.target_sst_size);
         last_mmt.flush(&mut builder)?;
         let id = last_mmt.id();
-        let ss_table =
-            Arc::new(builder.build(id, Some(self.block_cache.clone()), self.path_of_sst(id))?);
+        let ss_table = Arc::new(
+            builder.build(id, Some(self.block_cache.clone()), self.path_of_sst(id))?
+        );
 
         // 删除memtable, cow更新state
         let mut write_guard = self.state.write();
         let mut snap = write_guard.as_ref().clone();
         snap.imm_memtables.pop();
-        snap.l0_sstables.insert(0, ss_table.sst_id());
+        if self.compaction_controller.flush_to_l0() {
+            snap.l0_sstables.insert(0, ss_table.sst_id());
+        } else {
+            snap.levels.insert(0, (ss_table.sst_id(), vec![ss_table.sst_id()]));
+        }
         snap.sstables.insert(ss_table.sst_id(), ss_table);
         // 将cow后的state作为最新的读写锁保护的引用
         *write_guard = Arc::new(snap);
@@ -482,7 +491,7 @@ impl LsmStorageInner {
     pub fn scan(
         &self,
         _lower: Bound<&[u8]>,
-        _upper: Bound<&[u8]>,
+        _upper: Bound<&[u8]>
     ) -> Result<FusedIterator<LsmIterator>> {
         let snapshot = {
             let guard = self.state.read();
@@ -490,30 +499,29 @@ impl LsmStorageInner {
         };
 
         let cur = Box::new(snapshot.memtable.scan(_lower, _upper));
-        let mut memtable_iter: Vec<Box<MemTableIterator>> = snapshot
-            .imm_memtables
+        let mut memtable_iter: Vec<Box<MemTableIterator>> = snapshot.imm_memtables
             .iter()
             .map(|table| Box::new(table.scan(_lower, _upper)))
             .collect();
         memtable_iter.insert(0, cur);
 
-        let mut sstable_iter: Vec<Box<SsTableIterator>> =
-            Vec::with_capacity(snapshot.l0_sstables.capacity());
+        let mut sstable_iter: Vec<Box<SsTableIterator>> = Vec::with_capacity(
+            snapshot.l0_sstables.capacity()
+        );
         for i in snapshot.l0_sstables.iter() {
             let table = snapshot.sstables.get(i).unwrap().clone();
             if Self::out_bound(table.clone(), _lower, _upper) {
                 continue;
             }
             let iter = match _lower {
-                Bound::Included(lower) => Box::new(SsTableIterator::create_and_seek_to_key(
-                    table,
-                    KeySlice::from_slice(lower),
-                )?),
+                Bound::Included(lower) =>
+                    Box::new(
+                        SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(lower))?
+                    ),
                 Bound::Excluded(lower) => {
-                    let mut iter = Box::new(SsTableIterator::create_and_seek_to_key(
-                        table,
-                        KeySlice::from_slice(lower),
-                    )?);
+                    let mut iter = Box::new(
+                        SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(lower))?
+                    );
                     while iter.is_valid() && iter.key() == KeySlice::from_slice(lower) {
                         iter.next()?;
                     }
@@ -525,12 +533,11 @@ impl LsmStorageInner {
         }
         let two = TwoMergeIterator::create(
             MergeIterator::create(memtable_iter),
-            MergeIterator::create(sstable_iter),
+            MergeIterator::create(sstable_iter)
         )?;
 
         // 处理l1
-        let l1_ssts = snapshot.levels[0]
-            .1
+        let l1_ssts = snapshot.levels[0].1
             .iter()
             .map(|id| snapshot.sstables.get(id).unwrap().clone())
             .collect();
@@ -542,7 +549,7 @@ impl LsmStorageInner {
             Bound::Excluded(lower) => {
                 let mut iter = SstConcatIterator::create_and_seek_to_key(
                     l1_ssts,
-                    KeySlice::from_slice(lower),
+                    KeySlice::from_slice(lower)
                 )?;
                 while iter.is_valid() && iter.key().raw_ref() == lower {
                     iter.next()?;

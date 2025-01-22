@@ -220,6 +220,22 @@ impl LsmStorageInner {
                     self.compact_by_iter(two)
                 }
             }
+            CompactionTask::Tiered(task) => {
+                let snapshot = {
+                    let guard = self.state.read();
+                    guard.clone()
+                };
+                let mut iters = vec![];
+                for (_, ssts) in &task.tiers {
+                    let sst_arcs = ssts
+                        .iter()
+                        .map(|id| { snapshot.sstables.get(id).unwrap().clone() })
+                        .collect::<Vec<_>>();
+                    iters.push(Box::new(SstConcatIterator::create_and_seek_to_first(sst_arcs)?));
+                }
+                let iter = MergeIterator::create(iters);
+                self.compact_by_iter(iter)
+            }
             _ => unimplemented!(),
         }
     }
@@ -272,7 +288,7 @@ impl LsmStorageInner {
                 let mut output: Vec<usize> = vec![];
                 // lock state,确保这段时间只有自己写state的指针
                 let state_mutex = self.state_lock.lock();
-                // 需要重读并clone,(state是cow的, l0 flush会导致指针更新)
+                // 需要重读指针再clone内容,(state是cow的, compact期间同时l0 flush会导致指针更新)
                 let mut clone = self.state.read().as_ref().clone();
                 for sst in &result {
                     clone.sstables.insert(sst.sst_id(), sst.clone());
