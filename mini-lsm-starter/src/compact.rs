@@ -177,22 +177,40 @@ impl LsmStorageInner {
             CompactionTask::ForceFullCompaction { l0_sstables, l1_sstables } => {
                 self.force_full_compact(l0_sstables, l1_sstables)
             }
-            CompactionTask::Simple(task) => {
+
+            | CompactionTask::Leveled(
+                  LeveledCompactionTask {
+                      upper_level,
+                      upper_level_sst_ids,
+                      lower_level: _,
+                      lower_level_sst_ids,
+                      ..
+                  },
+              )
+            | CompactionTask::Simple(
+                  SimpleLeveledCompactionTask {
+                      upper_level,
+                      upper_level_sst_ids,
+                      lower_level: _,
+                      lower_level_sst_ids,
+                      ..
+                  },
+              ) => {
                 let snapshot = {
                     let guard = self.state.read();
                     guard.clone()
                 };
-                let lower: Vec<Arc<SsTable>> = task.lower_level_sst_ids
+                let lower: Vec<Arc<SsTable>> = lower_level_sst_ids
                     .iter()
                     .map(|id| snapshot.sstables.get(id).unwrap().clone())
                     .collect();
 
-                let upper: Vec<Arc<SsTable>> = task.upper_level_sst_ids
+                let upper: Vec<Arc<SsTable>> = upper_level_sst_ids
                     .iter()
                     .map(|id| snapshot.sstables.get(id).unwrap().clone())
                     .collect();
 
-                if task.upper_level.is_none() {
+                if upper_level.is_none() {
                     let l0 = upper
                         .iter()
                         .map(|sst| {
@@ -220,6 +238,7 @@ impl LsmStorageInner {
                     self.compact_by_iter(two)
                 }
             }
+            // tiered没有l0,但是涉及层数可能不止两层, 取所有level的sst_concat的mergeIter即可
             CompactionTask::Tiered(task) => {
                 let snapshot = {
                     let guard = self.state.read();

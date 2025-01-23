@@ -319,25 +319,28 @@ impl LsmStorageInner {
         // 1. mergeIter非法,说明key太大了
         // 2. mergeIter.key (代表所有sstable中>=_key的最小key) > _key ; 说明没有这个key
         // 3. key match,兼容删除场景即可
-        let mut sstable_iter = Vec::with_capacity(snapshot.l0_sstables.len());
+        let mut l0_iter = Vec::with_capacity(snapshot.l0_sstables.len());
         for i in snapshot.l0_sstables.iter() {
             let table = snapshot.sstables.get(i).unwrap().clone();
             let iter = Box::new(
                 SsTableIterator::create_and_seek_to_key(table, KeySlice::from_slice(_key))?
             );
-            sstable_iter.push(iter);
+            l0_iter.push(iter);
         }
 
-        let l1_ssts = snapshot.levels[0].1
-            .iter()
-            .map(|id| snapshot.sstables.get(id).unwrap().clone())
+        let iters = (0..snapshot.levels.len())
+            .into_iter()
+            .map(|level| {
+                self.get_sst_concat_iter(snapshot.clone(), level, Bound::Included(_key))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let level_iters: Vec<_> = iters
+            .into_iter()
+            .map(|iter| Box::new(iter))
             .collect();
-        let l1_iter = SstConcatIterator::create_and_seek_to_key(
-            l1_ssts,
-            KeySlice::from_slice(_key)
-        )?;
+        let levels_iter = MergeIterator::create(level_iters);
 
-        let merge_iter = TwoMergeIterator::create(MergeIterator::create(sstable_iter), l1_iter)?;
+        let merge_iter = TwoMergeIterator::create(MergeIterator::create(l0_iter), levels_iter)?;
         if !merge_iter.is_valid() {
             return Ok(None);
         }
@@ -505,7 +508,7 @@ impl LsmStorageInner {
             .collect();
         memtable_iter.insert(0, cur);
 
-        let mut sstable_iter: Vec<Box<SsTableIterator>> = Vec::with_capacity(
+        let mut l0_iter: Vec<Box<SsTableIterator>> = Vec::with_capacity(
             snapshot.l0_sstables.capacity()
         );
         for i in snapshot.l0_sstables.iter() {
@@ -529,26 +532,50 @@ impl LsmStorageInner {
                 }
                 _ => Box::new(SsTableIterator::create_and_seek_to_first(table)?),
             };
-            sstable_iter.push(iter);
+            l0_iter.push(iter);
         }
         let two = TwoMergeIterator::create(
             MergeIterator::create(memtable_iter),
-            MergeIterator::create(sstable_iter)
+            MergeIterator::create(l0_iter)
         )?;
 
-        // 处理l1
-        let l1_ssts = snapshot.levels[0].1
-            .iter()
-            .map(|id| snapshot.sstables.get(id).unwrap().clone())
+        // 处理levels
+        let iters = (0..snapshot.levels.len())
+            .into_iter()
+            .map(|level| { self.get_sst_concat_iter(snapshot.clone(), level, _lower) })
+            .collect::<Result<Vec<_>>>()?;
+        let level_iters: Vec<_> = iters
+            .into_iter()
+            .map(|iter| Box::new(iter))
             .collect();
-        let l1_iter = match _lower {
+        let levels_iter = MergeIterator::create(level_iters);
+        let inner_iter = TwoMergeIterator::create(two, levels_iter)?;
+        // 这里是拷贝，否则数组引用逃逸出方法体
+        let bytes = _upper.map(|slice| Bytes::copy_from_slice(slice));
+        let iter = FusedIterator::new(LsmIterator::new(inner_iter, bytes)?);
+        Ok(iter)
+    }
+
+    pub fn get_sst_concat_iter(
+        &self,
+        state: Arc<LsmStorageState>,
+        level: usize,
+        _lower: Bound<&[u8]>
+    ) -> Result<SstConcatIterator> {
+        if state.levels[level].1.is_empty() {
+        }
+        let ssts = state.levels[0].1
+            .iter()
+            .map(|id| state.sstables.get(id).unwrap().clone())
+            .collect();
+        let iter = match _lower {
             Bound::Included(lower) => {
-                SstConcatIterator::create_and_seek_to_key(l1_ssts, KeySlice::from_slice(lower))?
+                SstConcatIterator::create_and_seek_to_key(ssts, KeySlice::from_slice(lower))?
             }
-            Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(l1_ssts)?,
+            Bound::Unbounded => SstConcatIterator::create_and_seek_to_first(ssts)?,
             Bound::Excluded(lower) => {
                 let mut iter = SstConcatIterator::create_and_seek_to_key(
-                    l1_ssts,
+                    ssts,
                     KeySlice::from_slice(lower)
                 )?;
                 while iter.is_valid() && iter.key().raw_ref() == lower {
@@ -557,11 +584,6 @@ impl LsmStorageInner {
                 iter
             }
         };
-        let inner_iter = TwoMergeIterator::create(two, l1_iter)?;
-
-        // 这里是拷贝，否则数组引用逃逸出方法体
-        let bytes = _upper.map(|slice| Bytes::copy_from_slice(slice));
-        let iter = FusedIterator::new(LsmIterator::new(inner_iter, bytes)?);
         Ok(iter)
     }
 }
