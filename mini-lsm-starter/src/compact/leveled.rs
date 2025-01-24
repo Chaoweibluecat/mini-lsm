@@ -1,4 +1,4 @@
-use serde::{ Deserialize, Serialize };
+use serde::{Deserialize, Serialize};
 
 use crate::lsm_storage::LsmStorageState;
 
@@ -34,7 +34,7 @@ impl LeveledCompactionController {
         &self,
         _snapshot: &LsmStorageState,
         _sst_ids: &[usize],
-        _in_level: usize
+        _in_level: usize,
     ) -> Vec<usize> {
         let ssts = _sst_ids
             .iter()
@@ -45,17 +45,10 @@ impl LeveledCompactionController {
         if ssts.is_empty() {
             return vec![];
         }
-        let min = ssts
-            .iter()
-            .map(|sst| sst.first_key())
-            .min()
-            .unwrap();
-        let max = ssts
-            .iter()
-            .map(|sst| sst.last_key())
-            .max()
-            .unwrap();
-        let target_ssts = _snapshot.levels[_in_level - 1].1
+        let min = ssts.iter().map(|sst| sst.first_key()).min().unwrap();
+        let max = ssts.iter().map(|sst| sst.last_key()).max().unwrap();
+        let target_ssts = _snapshot.levels[_in_level - 1]
+            .1
             .iter()
             .map(|sst_id| _snapshot.sstables.get(sst_id))
             .filter(|op| op.is_some())
@@ -71,13 +64,13 @@ impl LeveledCompactionController {
 
     pub fn generate_compaction_task(
         &self,
-        _snapshot: &LsmStorageState
+        _snapshot: &LsmStorageState,
     ) -> Option<LeveledCompactionTask> {
         let mut real_size = vec![];
         for i in 0..self.options.max_levels {
-            let size = _snapshot.levels[i].1
-                .iter()
-                .fold(0, |acc, id| { acc + _snapshot.sstables.get(id).unwrap().table_size() });
+            let size = _snapshot.levels[i].1.iter().fold(0, |acc, id| {
+                acc + _snapshot.sstables.get(id).unwrap().table_size()
+            });
             real_size.push(size);
         }
         // 1.基于两条规则计算target_size
@@ -106,16 +99,16 @@ impl LeveledCompactionController {
             }
         }
         let base_idx = target_size.partition_point(|size| *size == 0);
-        let l0_size = _snapshot.l0_sstables
-            .iter()
-            .fold(0, |acc, id| { acc + _snapshot.sstables.get(id).unwrap().table_size() });
+        let l0_size = _snapshot.l0_sstables.iter().fold(0, |acc, id| {
+            acc + _snapshot.sstables.get(id).unwrap().table_size()
+        });
 
         // l0 flush to base level
         if l0_size >= (self.options.level0_file_num_compaction_trigger as u64) {
             let lower_level_sst_ids = self.find_overlapping_ssts(
                 _snapshot,
                 &_snapshot.l0_sstables[_snapshot.l0_sstables.len() - 1..],
-                base_idx + 1
+                base_idx + 1,
             );
 
             Some(LeveledCompactionTask {
@@ -153,13 +146,15 @@ impl LeveledCompactionController {
                 return None;
             }
             // 上层选出最老(sst_id 最小的sst), find下层overlap
-            let upper = _snapshot.levels[max_idx].1.iter().min().expect("no shit found").clone();
+            let upper = _snapshot.levels[max_idx]
+                .1
+                .iter()
+                .min()
+                .expect("no shit found")
+                .clone();
             let upper_level_sst_ids = vec![upper];
-            let lower_level_sst_ids = self.find_overlapping_ssts(
-                _snapshot,
-                &upper_level_sst_ids,
-                max_idx + 2
-            );
+            let lower_level_sst_ids =
+                self.find_overlapping_ssts(_snapshot, &upper_level_sst_ids, max_idx + 2);
             Some(LeveledCompactionTask {
                 upper_level: Some(max_idx + 1),
                 upper_level_sst_ids,
@@ -175,11 +170,12 @@ impl LeveledCompactionController {
         _snapshot: &LsmStorageState,
         _task: &LeveledCompactionTask,
         _output: &[usize],
-        _in_recovery: bool
+        _in_recovery: bool,
     ) -> (LsmStorageState, Vec<usize>) {
         let mut clone = _snapshot.clone();
         if _task.upper_level.is_none() {
-            let new_l0 = clone.l0_sstables
+            let new_l0 = clone
+                .l0_sstables
                 .iter()
                 .filter(|id| !_task.lower_level_sst_ids.contains(id))
                 .map(|x| *x)
@@ -194,11 +190,11 @@ impl LeveledCompactionController {
         // concat lower_level;另一种方法是直接extend进去,然后Lower_level再进行整体排序
         let first = prev_lower
             .iter()
-            .position(|&sst_id| { sst_id == _task.lower_level_sst_ids[0] })
+            .position(|&sst_id| sst_id == _task.lower_level_sst_ids[0])
             .expect("no such shit found");
         let last = prev_lower
             .iter()
-            .position(|&sst_id| { sst_id == *_task.lower_level_sst_ids.last().unwrap() })
+            .position(|&sst_id| sst_id == *_task.lower_level_sst_ids.last().unwrap())
             .expect("no such shit found");
         new_lower.extend(&prev_lower[0..first]);
         new_lower.extend(_output);

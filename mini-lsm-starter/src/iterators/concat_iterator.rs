@@ -39,6 +39,13 @@ impl SstConcatIterator {
     }
 
     pub fn create_and_seek_to_key(sstables: Vec<Arc<SsTable>>, key: KeySlice) -> Result<Self> {
+        if sstables.is_empty() {
+            return Ok(Self {
+                current: None,
+                next_sst_idx: 0,
+                sstables,
+            });
+        }
         let mut target = sstables
             .partition_point(|sst| sst.first_key().as_key_slice() <= key)
             .saturating_sub(1);

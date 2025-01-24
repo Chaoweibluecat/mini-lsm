@@ -134,7 +134,7 @@ impl MemTable {
         let mut iter = self.scan(Bound::Unbounded, Bound::Unbounded);
         while iter.is_valid() {
             _builder.add(iter.key(), iter.value());
-            iter.next();
+            iter.next()?;
         }
         Ok(())
     }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::{ Deserialize, Serialize };
+use serde::{Deserialize, Serialize};
 
 use crate::lsm_storage::LsmStorageState;
 
@@ -30,10 +30,13 @@ impl TieredCompactionController {
 
     pub fn generate_compaction_task(
         &self,
-        _snapshot: &LsmStorageState
+        _snapshot: &LsmStorageState,
     ) -> Option<TieredCompactionTask> {
         // write amp
-        let sum = &_snapshot.levels.iter().fold(0, |acc, level| { acc + level.1.len() });
+        let sum = &_snapshot
+            .levels
+            .iter()
+            .fold(0, |acc, level| acc + level.1.len());
         let bottom_level_sst_num = if let Some((_, ssts)) = _snapshot.levels.last() {
             ssts.len()
         } else {
@@ -57,11 +60,7 @@ impl TieredCompactionController {
                 let ratio = (ssts.len() as f64) / (counter as f64);
                 if ratio > ((100 + self.options.size_ratio) as f64) / 100.0 {
                     return Some(TieredCompactionTask {
-                        tiers: _snapshot.levels
-                            .iter()
-                            .take(idx + 1)
-                            .cloned()
-                            .collect(),
+                        tiers: _snapshot.levels.iter().take(idx + 1).cloned().collect(),
                         bottom_tier_included: idx == _snapshot.levels.len(),
                     });
                 } else {
@@ -81,7 +80,7 @@ impl TieredCompactionController {
         &self,
         _snapshot: &LsmStorageState,
         _task: &TieredCompactionTask,
-        _output: &[usize]
+        _output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
         // tier compaction,只修改levels数组
         let mut clone = _snapshot.clone();

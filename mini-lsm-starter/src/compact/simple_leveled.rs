@@ -1,16 +1,14 @@
-use std::{ collections::HashSet, sync::Arc };
+use std::{collections::HashSet, sync::Arc};
 
-use serde::{ Deserialize, Serialize };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     iterators::{
-        concat_iterator::SstConcatIterator,
-        merge_iterator::MergeIterator,
-        two_merge_iterator::TwoMergeIterator,
-        StorageIterator,
+        concat_iterator::SstConcatIterator, merge_iterator::MergeIterator,
+        two_merge_iterator::TwoMergeIterator, StorageIterator,
     },
     lsm_storage::LsmStorageState,
-    table::{ SsTable, SsTableIterator },
+    table::{SsTable, SsTableIterator},
 };
 
 #[derive(Debug, Clone)]
@@ -44,9 +42,12 @@ impl SimpleLeveledCompactionController {
     /// Returns `None` if no compaction needs to be scheduled. The order of SSTs in the compaction task id vector matters.
     pub fn generate_compaction_task(
         &self,
-        _snapshot: &LsmStorageState
+        _snapshot: &LsmStorageState,
     ) -> Option<SimpleLeveledCompactionTask> {
-        if _snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger {
+        if _snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger
+            && ((_snapshot.levels[0].1.len() as f64) / (_snapshot.l0_sstables.len() as f64)
+                < (self.options.size_ratio_percent as f64) / 100.0)
+        {
             Some(SimpleLeveledCompactionTask {
                 upper_level: None,
                 upper_level_sst_ids: _snapshot.l0_sstables.clone(),
@@ -58,7 +59,7 @@ impl SimpleLeveledCompactionController {
             let mut i = 0;
             let level = loop {
                 // i = base层
-                if i == self.options.max_levels {
+                if i >= self.options.max_levels - 1 {
                     break None;
                 }
                 if _snapshot.levels[i].1.is_empty() {
@@ -74,14 +75,13 @@ impl SimpleLeveledCompactionController {
             };
             match level {
                 None => None,
-                Some(i) =>
-                    Some(SimpleLeveledCompactionTask {
-                        upper_level: Some(i + 1),
-                        upper_level_sst_ids: _snapshot.levels[i].1.clone(),
-                        lower_level: i + 2,
-                        lower_level_sst_ids: _snapshot.levels[i + 1].1.clone(),
-                        is_lower_level_bottom_level: i + 1 == self.options.max_levels,
-                    }),
+                Some(i) => Some(SimpleLeveledCompactionTask {
+                    upper_level: Some(i + 1),
+                    upper_level_sst_ids: _snapshot.levels[i].1.clone(),
+                    lower_level: i + 2,
+                    lower_level_sst_ids: _snapshot.levels[i + 1].1.clone(),
+                    is_lower_level_bottom_level: i + 1 == self.options.max_levels,
+                }),
             }
         }
     }
@@ -97,11 +97,15 @@ impl SimpleLeveledCompactionController {
         &self,
         _snapshot: &LsmStorageState,
         _task: &SimpleLeveledCompactionTask,
-        _output: &[usize]
+        _output: &[usize],
     ) -> (LsmStorageState, Vec<usize>) {
         let mut clone = _snapshot.clone();
         let mut remove: Vec<usize> = vec![];
-        for sst in _task.lower_level_sst_ids.iter().chain(_task.upper_level_sst_ids.iter()) {
+        for sst in _task
+            .lower_level_sst_ids
+            .iter()
+            .chain(_task.upper_level_sst_ids.iter())
+        {
             clone.sstables.remove(&sst);
             remove.push(*sst);
         }
@@ -111,7 +115,8 @@ impl SimpleLeveledCompactionController {
         } else {
             // 可能有l0 flush同时发生,需要remove而不是clear
             let snap_l0 = _snapshot.l0_sstables.iter().collect::<HashSet<_>>();
-            let new_l0 = clone.l0_sstables
+            let new_l0 = clone
+                .l0_sstables
                 .iter()
                 .filter(|sst| !snap_l0.contains(sst))
                 .copied()
