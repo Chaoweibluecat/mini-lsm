@@ -268,9 +268,11 @@ impl LsmStorageInner {
             l0_sstables: snap.0.clone(),
             l1_sstables: snap.1.clone(),
         };
+        // compact期间不block l0 flush,不take state lock; 只在cow时拿mutex
         let output = self.compact(&task)?;
 
         let mutex = self.state_lock.lock();
+        // reacquire state快照, 此时l0_ssts可能已经改变了
         let mut write_guard = self.state.write();
         let mut copy = write_guard.as_ref().clone();
         for prev_l1 in &snap.1 {
@@ -287,12 +289,23 @@ impl LsmStorageInner {
             copy.sstables.insert(new_sst.sst_id(), new_sst);
         }
         copy.levels[0] = (0, new_l1.clone());
-        copy.l0_sstables.clear();
+        let new_l0 = copy.l0_sstables
+            .iter()
+            .filter(|id| !snap.0.contains(id))
+            .map(|x| *x)
+            .collect::<Vec<_>>();
+        copy.l0_sstables = new_l0;
         *write_guard = Arc::new(copy);
+        self.sync_dir();
+
         if let Some(manifest) = self.manifest.as_ref() {
             manifest.add_record(&mutex, crate::manifest::ManifestRecord::Compaction(task, new_l1));
         }
         drop(mutex);
+        for remove_sst_id in snap.0.iter().chain(snap.1.iter()) {
+            std::fs::remove_file(self.path_of_sst(*remove_sst_id));
+        }
+
         Ok(())
     }
 
@@ -323,16 +336,24 @@ impl LsmStorageInner {
                 );
                 let mut ref1 = self.state.write();
                 *ref1 = Arc::new(state);
+
+                // 1.sync compacted output files and dir
+                self.sync_dir()?;
+
+                // 2.write manifest and sync
                 if let Some(manifest) = self.manifest.as_ref() {
                     manifest.add_record(
-                        &state_mutex,
+                        &self.state_lock.lock(),
                         crate::manifest::ManifestRecord::Compaction(task, output)
                     );
                 }
                 drop(state_mutex);
+
+                // 删除文件不用在临界区里
                 for delete_f in deleted {
                     std::fs::remove_file(self.path_of_sst(delete_f));
                 }
+                self.sync_dir()?;
 
                 Ok(())
             }

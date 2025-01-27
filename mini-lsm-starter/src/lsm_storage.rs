@@ -16,6 +16,7 @@ use crate::block::Block;
 use crate::compact::{
     CompactionController,
     CompactionOptions,
+    CompactionTask,
     LeveledCompactionController,
     LeveledCompactionOptions,
     SimpleLeveledCompactionController,
@@ -31,7 +32,7 @@ use crate::lsm_iterator::{ FusedIterator, LsmIterator };
 use crate::manifest::{ self, Manifest, ManifestRecord };
 use crate::mem_table::{ map_bound, MemTable, MemTableIterator };
 use crate::mvcc::LsmMvccInner;
-use crate::table::{ SsTable, SsTableBuilder, SsTableIterator };
+use crate::table::{ FileObject, SsTable, SsTableBuilder, SsTableIterator };
 
 pub type BlockCache = moka::sync::Cache<(usize, usize), Arc<Block>>;
 
@@ -165,6 +166,7 @@ impl Drop for MiniLsm {
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
         self.flush_notifier.send(())?;
+        self.force_flush();
         Ok(())
     }
 
@@ -248,14 +250,7 @@ impl LsmStorageInner {
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
         let path = path.as_ref();
-        let state = LsmStorageState::create(&options);
-
-        let manifest_path = path.join("MANIFEST");
-        let manifest = if manifest_path.exists() {
-            None
-        } else {
-            Some(Manifest::create(manifest_path)?)
-        };
+        let mut state = LsmStorageState::create(&options);
 
         let compaction_controller = match &options.compaction_options {
             CompactionOptions::Leveled(options) => {
@@ -271,11 +266,83 @@ impl LsmStorageInner {
             CompactionOptions::NoCompaction => CompactionController::NoCompaction,
         };
 
+        let manifest_path = path.join("MANIFEST");
+        let block_cache = Arc::new(BlockCache::new(1024));
+        let manifest = if manifest_path.exists() {
+            // recover state from manifest
+            let (manifest, records) = Manifest::recover(manifest_path)?;
+            for record in records {
+                // replay record,模拟state的变化
+                match record {
+                    ManifestRecord::Compaction(task, outputs) => {
+                        match task {
+                            CompactionTask::ForceFullCompaction { l0_sstables, l1_sstables } => {
+                                // todo 真的会有不等效于clear的场景吗? 好像可以直接clear
+                                let new_l0 = state.l0_sstables
+                                    .iter()
+                                    .filter(|id| !l0_sstables.contains(id))
+                                    .map(|x| *x)
+                                    .collect::<Vec<_>>();
+                                let new_l1 = state.levels[0].1
+                                    .iter()
+                                    .filter(|id| !l1_sstables.contains(id))
+                                    .map(|x| *x)
+                                    .collect::<Vec<_>>();
+                                state.l0_sstables = new_l0;
+                                state.levels[0].1 = new_l1;
+                                state.levels[0].1.extend(outputs);
+                            }
+                            _ => {
+                                let (new_state, _) = compaction_controller.apply_compaction_result(
+                                    &state,
+                                    &task,
+                                    &outputs,
+                                    true
+                                );
+                                state = new_state;
+                            }
+                        }
+                    }
+                    ManifestRecord::Flush(sst_id) => {
+                        if compaction_controller.flush_to_l0() {
+                            state.l0_sstables.insert(0, sst_id);
+                        } else {
+                            state.levels[0].1.insert(0, sst_id);
+                        }
+                    }
+                    _ => unimplemented!(),
+                }
+            }
+
+            // replay 结束后reopen所有sst file
+            for l0_sst in &state.l0_sstables {
+                let sst = SsTable::open(
+                    *l0_sst,
+                    Some(block_cache.clone()),
+                    FileObject::open(&Self::path_of_sst_static(path, *l0_sst))?
+                )?;
+                state.sstables.insert(*l0_sst, Arc::new(sst));
+            }
+            for (_, ssts) in &state.levels {
+                for sst_id in ssts {
+                    let sst = SsTable::open(
+                        *sst_id,
+                        Some(block_cache.clone()),
+                        FileObject::open(&Self::path_of_sst_static(path, *sst_id))?
+                    )?;
+                    state.sstables.insert(*sst_id, Arc::new(sst));
+                }
+            }
+            Some(manifest)
+        } else {
+            Some(Manifest::create(manifest_path)?)
+        };
+
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
             path: path.to_path_buf(),
-            block_cache: Arc::new(BlockCache::new(1024)),
+            block_cache,
             next_sst_id: AtomicUsize::new(1),
             compaction_controller,
             manifest,
@@ -472,10 +539,14 @@ impl LsmStorageInner {
         *write_guard = Arc::new(snap);
         drop(write_guard);
 
+        // sync new written file and storage directory
+        self.sync_dir()?;
+
+        // write manifest and sync
         if let Some(manifest) = self.manifest.as_ref() {
             manifest.add_record(&self.state_lock.lock(), ManifestRecord::Flush(id));
         }
-        self.sync_dir()?;
+        // todo 这里需要sync吗??
         Ok(())
     }
 
