@@ -166,7 +166,19 @@ impl Drop for MiniLsm {
 impl MiniLsm {
     pub fn close(&self) -> Result<()> {
         self.flush_notifier.send(())?;
-        self.force_flush();
+
+        if !self.inner.options.enable_wal {
+            if !self.inner.state.read().memtable.is_empty() {
+                let lock = self.inner.state_lock.lock();
+                self.inner.force_freeze_memtable(&lock);
+                drop(lock);
+            }
+            // 每次update都会更新state引用,这里需要循环重读
+            while !self.inner.state.read().imm_memtables.is_empty() {
+                self.inner.force_flush_next_imm_memtable();
+            }
+        }
+        self.inner.sync_dir();
         Ok(())
     }
 
@@ -265,6 +277,7 @@ impl LsmStorageInner {
                 ),
             CompactionOptions::NoCompaction => CompactionController::NoCompaction,
         };
+        let mut next_sst_id = 1;
 
         let manifest_path = path.join("MANIFEST");
         let block_cache = Arc::new(BlockCache::new(1024));
@@ -309,6 +322,7 @@ impl LsmStorageInner {
                         } else {
                             state.levels[0].1.insert(0, sst_id);
                         }
+                        next_sst_id = next_sst_id.max(sst_id);
                     }
                     _ => unimplemented!(),
                 }
@@ -337,13 +351,12 @@ impl LsmStorageInner {
         } else {
             Some(Manifest::create(manifest_path)?)
         };
-
         let storage = Self {
             state: Arc::new(RwLock::new(Arc::new(state))),
             state_lock: Mutex::new(()),
             path: path.to_path_buf(),
             block_cache,
-            next_sst_id: AtomicUsize::new(1),
+            next_sst_id: AtomicUsize::new(next_sst_id),
             compaction_controller,
             manifest,
             options: options.into(),
@@ -511,6 +524,10 @@ impl LsmStorageInner {
 
     /// Force flush the earliest-created immutable memtable to disk
     pub fn force_flush_next_imm_memtable(&self) -> Result<()> {
+        // 需要串行state的写;
+        // 如果两个线程同时调用force_flush_next_imm_memtable,临界区在第一个read外的话,
+        // 两个线程会读到同一个mmt,并导致flush两遍
+        let mutex = self.state_lock.lock();
         // 1.读出last memtable
         let last_mmt = {
             let read1 = self.state.read();
@@ -544,7 +561,7 @@ impl LsmStorageInner {
 
         // write manifest and sync
         if let Some(manifest) = self.manifest.as_ref() {
-            manifest.add_record(&self.state_lock.lock(), ManifestRecord::Flush(id));
+            manifest.add_record(&mutex, ManifestRecord::Flush(id));
         }
         // todo 这里需要sync吗??
         Ok(())
