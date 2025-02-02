@@ -9,25 +9,23 @@ use std::iter;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{ Ok, Result };
+use anyhow::{Ok, Result};
 use bytes::BufMut;
-pub use leveled::{ LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask };
-use serde::{ Deserialize, Serialize };
+pub use leveled::{LeveledCompactionController, LeveledCompactionOptions, LeveledCompactionTask};
+use serde::{Deserialize, Serialize};
 pub use simple_leveled::{
-    SimpleLeveledCompactionController,
-    SimpleLeveledCompactionOptions,
-    SimpleLeveledCompactionTask,
+    SimpleLeveledCompactionController, SimpleLeveledCompactionOptions, SimpleLeveledCompactionTask,
 };
-pub use tiered::{ TieredCompactionController, TieredCompactionOptions, TieredCompactionTask };
+pub use tiered::{TieredCompactionController, TieredCompactionOptions, TieredCompactionTask};
 
 use crate::iterators::concat_iterator::SstConcatIterator;
 use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::KeySlice;
-use crate::lsm_storage::{ LsmStorageInner, LsmStorageState };
+use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
 use crate::manifest::Manifest;
-use crate::table::{ SsTable, SsTableBuilder, SsTableIterator };
+use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum CompactionTask {
@@ -61,12 +59,15 @@ pub(crate) enum CompactionController {
 impl CompactionController {
     pub fn generate_compaction_task(&self, snapshot: &LsmStorageState) -> Option<CompactionTask> {
         match self {
-            CompactionController::Leveled(ctrl) =>
-                ctrl.generate_compaction_task(snapshot).map(CompactionTask::Leveled),
-            CompactionController::Simple(ctrl) =>
-                ctrl.generate_compaction_task(snapshot).map(CompactionTask::Simple),
-            CompactionController::Tiered(ctrl) =>
-                ctrl.generate_compaction_task(snapshot).map(CompactionTask::Tiered),
+            CompactionController::Leveled(ctrl) => ctrl
+                .generate_compaction_task(snapshot)
+                .map(CompactionTask::Leveled),
+            CompactionController::Simple(ctrl) => ctrl
+                .generate_compaction_task(snapshot)
+                .map(CompactionTask::Simple),
+            CompactionController::Tiered(ctrl) => ctrl
+                .generate_compaction_task(snapshot)
+                .map(CompactionTask::Tiered),
             CompactionController::NoCompaction => unreachable!(),
         }
     }
@@ -76,7 +77,7 @@ impl CompactionController {
         snapshot: &LsmStorageState,
         task: &CompactionTask,
         output: &[usize],
-        in_recovery: bool
+        in_recovery: bool,
     ) -> (LsmStorageState, Vec<usize>) {
         match (self, task) {
             (CompactionController::Leveled(ctrl), CompactionTask::Leveled(task)) => {
@@ -95,7 +96,10 @@ impl CompactionController {
 
 impl CompactionController {
     pub fn flush_to_l0(&self) -> bool {
-        matches!(self, Self::Leveled(_) | Self::Simple(_) | Self::NoCompaction)
+        matches!(
+            self,
+            Self::Leveled(_) | Self::Simple(_) | Self::NoCompaction
+        )
     }
 }
 
@@ -115,7 +119,7 @@ pub enum CompactionOptions {
 impl LsmStorageInner {
     fn compact_by_iter(
         &self,
-        mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>
+        mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
     ) -> Result<Vec<Arc<SsTable>>> {
         let mut cur = SsTableBuilder::new(self.options.block_size);
         let mut result = vec![];
@@ -128,7 +132,7 @@ impl LsmStorageInner {
                     let ss_table = cur.build(
                         sst_id,
                         Some(self.block_cache.clone()),
-                        self.path_of_sst(sst_id)
+                        self.path_of_sst(sst_id),
                     )?;
                     result.push(Arc::new(ss_table));
                     cur = SsTableBuilder::new(self.options.block_size);
@@ -141,7 +145,7 @@ impl LsmStorageInner {
             let ss_table = cur.build(
                 sst_id,
                 Some(self.block_cache.clone()),
-                self.path_of_sst(sst_id)
+                self.path_of_sst(sst_id),
             )?;
             result.push(Arc::new(ss_table));
         }
@@ -151,7 +155,7 @@ impl LsmStorageInner {
     fn force_full_compact(
         &self,
         l0_sstables: &Vec<usize>,
-        l1_sstables: &Vec<usize>
+        l1_sstables: &Vec<usize>,
     ) -> Result<Vec<Arc<SsTable>>> {
         // todo remove file
         let mut vec: Vec<usize> = Vec::with_capacity(l0_sstables.len() + l1_sstables.len());
@@ -167,7 +171,9 @@ impl LsmStorageInner {
         };
         let mut iters = vec![];
         for ss_table in snap {
-            iters.push(Box::new(SsTableIterator::create_and_seek_to_first(ss_table)?));
+            iters.push(Box::new(SsTableIterator::create_and_seek_to_first(
+                ss_table,
+            )?));
         }
         let merge_iter = MergeIterator::create(iters);
         self.compact_by_iter(merge_iter)
@@ -175,27 +181,27 @@ impl LsmStorageInner {
 
     fn compact(&self, _task: &CompactionTask) -> Result<Vec<Arc<SsTable>>> {
         match _task {
-            CompactionTask::ForceFullCompaction { l0_sstables, l1_sstables } =>
-                self.force_full_compact(l0_sstables, l1_sstables),
+            CompactionTask::ForceFullCompaction {
+                l0_sstables,
+                l1_sstables,
+            } => self.force_full_compact(l0_sstables, l1_sstables),
 
-            | CompactionTask::Leveled(
-                  LeveledCompactionTask {
-                      upper_level,
-                      upper_level_sst_ids,
-                      lower_level: _,
-                      lower_level_sst_ids,
-                      ..
-                  },
-              )
-            | CompactionTask::Simple(
-                  SimpleLeveledCompactionTask {
-                      upper_level,
-                      upper_level_sst_ids,
-                      lower_level: _,
-                      lower_level_sst_ids,
-                      ..
-                  },
-              ) => {
+            CompactionTask::Leveled(LeveledCompactionTask {
+                upper_level,
+                upper_level_sst_ids,
+                lower_level: _,
+                lower_level_sst_ids,
+                ..
+            })
+            | CompactionTask::Simple(SimpleLeveledCompactionTask {
+                upper_level,
+                upper_level_sst_ids,
+                lower_level: _,
+                lower_level_sst_ids,
+                ..
+            }) => {
+                let lower_level_sst_ids = lower_level_sst_ids.clone();
+                let upper_level_sst_ids = upper_level_sst_ids.clone();
                 let snapshot = {
                     let guard = self.state.read();
                     guard.clone()
@@ -215,25 +221,22 @@ impl LsmStorageInner {
                         .iter()
                         .map(|sst| {
                             Box::new(
-                                SsTableIterator::create_and_seek_to_first(sst.clone()).expect(
-                                    "fail to generate sst iter"
-                                )
+                                SsTableIterator::create_and_seek_to_first(sst.clone())
+                                    .expect("fail to generate sst iter"),
                             )
                         })
                         .collect();
                     let l0_iter = MergeIterator::create(l0);
-                    let l1_iter: SstConcatIterator = SstConcatIterator::create_and_seek_to_first(
-                        lower
-                    ).expect("fail to generate l1 sst iter");
+                    let l1_iter: SstConcatIterator =
+                        SstConcatIterator::create_and_seek_to_first(lower)
+                            .expect("fail to generate l1 sst iter");
                     let two = TwoMergeIterator::create(l0_iter, l1_iter)?;
                     self.compact_by_iter(two)
                 } else {
-                    let upper_iter = SstConcatIterator::create_and_seek_to_first(upper).expect(
-                        "fail to generate l1 sst iter"
-                    );
-                    let lower_iter = SstConcatIterator::create_and_seek_to_first(lower).expect(
-                        "fail to generate l1 sst iter"
-                    );
+                    let upper_iter = SstConcatIterator::create_and_seek_to_first(upper)
+                        .expect("fail to generate l1 sst iter");
+                    let lower_iter = SstConcatIterator::create_and_seek_to_first(lower)
+                        .expect("fail to generate l1 sst iter");
                     let two = TwoMergeIterator::create(upper_iter, lower_iter)?;
                     self.compact_by_iter(two)
                 }
@@ -250,7 +253,9 @@ impl LsmStorageInner {
                         .iter()
                         .map(|id| snapshot.sstables.get(id).unwrap().clone())
                         .collect::<Vec<_>>();
-                    iters.push(Box::new(SstConcatIterator::create_and_seek_to_first(sst_arcs)?));
+                    iters.push(Box::new(SstConcatIterator::create_and_seek_to_first(
+                        sst_arcs,
+                    )?));
                 }
                 let iter = MergeIterator::create(iters);
                 self.compact_by_iter(iter)
@@ -281,29 +286,30 @@ impl LsmStorageInner {
         for prev_l1 in &snap.0 {
             copy.sstables.remove(prev_l1);
         }
-        let new_l1 = output
-            .iter()
-            .map(|sst| sst.sst_id())
-            .collect::<Vec<_>>();
+        let new_l1 = output.iter().map(|sst| sst.sst_id()).collect::<Vec<_>>();
         for new_sst in output {
             copy.sstables.insert(new_sst.sst_id(), new_sst);
         }
         copy.levels[0] = (0, new_l1.clone());
-        let new_l0 = copy.l0_sstables
+        let new_l0 = copy
+            .l0_sstables
             .iter()
             .filter(|id| !snap.0.contains(id))
             .map(|x| *x)
             .collect::<Vec<_>>();
         copy.l0_sstables = new_l0;
         *write_guard = Arc::new(copy);
-        self.sync_dir();
+        self.sync_dir()?;
 
         if let Some(manifest) = self.manifest.as_ref() {
-            manifest.add_record(&mutex, crate::manifest::ManifestRecord::Compaction(task, new_l1));
+            manifest.add_record(
+                &mutex,
+                crate::manifest::ManifestRecord::Compaction(task, new_l1),
+            )?;
         }
         drop(mutex);
         for remove_sst_id in snap.0.iter().chain(snap.1.iter()) {
-            std::fs::remove_file(self.path_of_sst(*remove_sst_id));
+            std::fs::remove_file(self.path_of_sst(*remove_sst_id))?;
         }
 
         Ok(())
@@ -314,11 +320,14 @@ impl LsmStorageInner {
             let guard = self.state.read();
             guard.clone()
         };
-        let task = self.compaction_controller.generate_compaction_task(&*snapshot);
+        let task = self
+            .compaction_controller
+            .generate_compaction_task(&*snapshot);
         match task {
             None => Ok(()),
             Some(task) => {
                 let result = self.compact(&task)?;
+
                 let mut output: Vec<usize> = vec![];
                 // lock state,确保这段时间只有自己写state的指针
                 let state_mutex = self.state_lock.lock();
@@ -328,30 +337,31 @@ impl LsmStorageInner {
                     clone.sstables.insert(sst.sst_id(), sst.clone());
                     output.push(sst.sst_id());
                 }
-                let (state, deleted) = self.compaction_controller.apply_compaction_result(
-                    &clone,
-                    &task,
-                    &output,
-                    false
-                );
+                let (mut state, deleted) = self
+                    .compaction_controller
+                    .apply_compaction_result(&clone, &task, &output, false);
+                for delete_sst in &deleted {
+                    state.sstables.remove(delete_sst);
+                }
                 let mut ref1 = self.state.write();
                 *ref1 = Arc::new(state);
-
+                //写完直接释放,实测会持有到方法结束为止
+                drop(ref1);
                 // 1.sync compacted output files and dir
                 self.sync_dir()?;
 
                 // 2.write manifest and sync
                 if let Some(manifest) = self.manifest.as_ref() {
                     manifest.add_record(
-                        &self.state_lock.lock(),
-                        crate::manifest::ManifestRecord::Compaction(task, output)
-                    );
+                        &state_mutex,
+                        crate::manifest::ManifestRecord::Compaction(task, output),
+                    )?;
                 }
                 drop(state_mutex);
 
                 // 删除文件不用在临界区里
                 for delete_f in deleted {
-                    std::fs::remove_file(self.path_of_sst(delete_f));
+                    std::fs::remove_file(self.path_of_sst(delete_f))?;
                 }
                 self.sync_dir()?;
 
@@ -362,13 +372,11 @@ impl LsmStorageInner {
 
     pub(crate) fn spawn_compaction_thread(
         self: &Arc<Self>,
-        rx: crossbeam_channel::Receiver<()>
+        rx: crossbeam_channel::Receiver<()>,
     ) -> Result<Option<std::thread::JoinHandle<()>>> {
-        if
-            let
-            | CompactionOptions::Leveled(_)
-            | CompactionOptions::Simple(_)
-            | CompactionOptions::Tiered(_) = self.options.compaction_options
+        if let CompactionOptions::Leveled(_)
+        | CompactionOptions::Simple(_)
+        | CompactionOptions::Tiered(_) = self.options.compaction_options
         {
             let this = self.clone();
             let handle = std::thread::spawn(move || {
@@ -402,7 +410,7 @@ impl LsmStorageInner {
 
     pub(crate) fn spawn_flush_thread(
         self: &Arc<Self>,
-        rx: crossbeam_channel::Receiver<()>
+        rx: crossbeam_channel::Receiver<()>,
     ) -> Result<Option<std::thread::JoinHandle<()>>> {
         let this = self.clone();
         let handle = std::thread::spawn(move || {

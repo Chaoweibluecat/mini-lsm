@@ -69,7 +69,7 @@ impl<
         if self.cur == 0 {
             // 处理 a.key = b.key的情况,此时需要一起advance
             if self.b.is_valid() && self.a.key() == self.b.key() {
-                self.b.next();
+                self.b.next()?;
             }
             self.a.next()?;
 

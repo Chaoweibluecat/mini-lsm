@@ -84,23 +84,21 @@ impl StorageIterator for SstConcatIterator {
     }
 
     fn is_valid(&self) -> bool {
-        self.current.is_some() && self.current.as_ref().unwrap().is_valid()
+        self.current.is_some()
     }
 
     fn next(&mut self) -> Result<()> {
+        self.current.as_mut().unwrap().next()?;
         if !self.current.as_ref().unwrap().is_valid() {
-            self.next_sst_idx = self.next_sst_idx.saturating_add(1);
             if self.next_sst_idx >= self.sstables.len() {
                 self.current = None;
-                return Ok(());
             } else {
                 self.current = Some(SsTableIterator::create_and_seek_to_first(
                     self.sstables[self.next_sst_idx].clone(),
                 )?);
-                return Ok(());
+                self.next_sst_idx = self.next_sst_idx.saturating_add(1);
             }
         }
-        self.current.as_mut().unwrap().next()?;
         Ok(())
     }
 

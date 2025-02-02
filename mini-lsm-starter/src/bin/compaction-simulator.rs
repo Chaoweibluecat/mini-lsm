@@ -51,7 +51,7 @@ enum Args {
         /// it will print one row per compaction iteration.
         #[clap(long)]
         size_only: bool,
-        #[clap(long, default_value = "8")]
+        #[clap(long, default_value = "3")]
         num_tiers: usize,
         #[clap(long, default_value = "200")]
         max_size_amplification_percent: usize,
@@ -392,6 +392,16 @@ fn main() {
                 min_merge_width,
                 max_merge_width,
             });
+            println!(
+                "options {:?}",
+                TieredCompactionOptions {
+                    num_tiers: level0_file_num_compaction_trigger,
+                    max_size_amplification_percent,
+                    size_ratio,
+                    min_merge_width,
+                    max_merge_width,
+                }
+            );
             let mut storage = MockStorage::new();
             let mut max_space = 0;
             for i in 0..iterations {

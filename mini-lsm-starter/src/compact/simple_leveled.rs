@@ -106,7 +106,6 @@ impl SimpleLeveledCompactionController {
             .iter()
             .chain(_task.upper_level_sst_ids.iter())
         {
-            clone.sstables.remove(&sst);
             remove.push(*sst);
         }
 
@@ -114,12 +113,16 @@ impl SimpleLeveledCompactionController {
             clone.levels[upper - 1].1.clear();
         } else {
             // 可能有l0 flush同时发生,需要remove而不是clear
-            let snap_l0 = _snapshot.l0_sstables.iter().collect::<HashSet<_>>();
+            let remove_ssts: HashSet<usize> = _task
+                .upper_level_sst_ids
+                .iter()
+                .copied()
+                .collect::<HashSet<_>>();
             let new_l0 = clone
                 .l0_sstables
                 .iter()
-                .filter(|sst| !snap_l0.contains(sst))
                 .copied()
+                .filter(|&sst| !remove_ssts.contains(&sst))
                 .collect::<Vec<_>>();
             clone.l0_sstables = new_l0;
         }

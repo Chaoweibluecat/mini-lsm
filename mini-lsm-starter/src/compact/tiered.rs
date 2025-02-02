@@ -32,6 +32,14 @@ impl TieredCompactionController {
         &self,
         _snapshot: &LsmStorageState,
     ) -> Option<TieredCompactionTask> {
+        if _snapshot.levels.len() < self.options.num_tiers {
+            println!(
+                "no compaction, current tiers count {}, target {}",
+                _snapshot.levels.len(),
+                self.options.num_tiers
+            );
+            return None;
+        }
         // write amp
         let sum = &_snapshot
             .levels
@@ -44,7 +52,12 @@ impl TieredCompactionController {
         };
         let sum_except_last = sum - bottom_level_sst_num;
         let amp_ratio = ((sum_except_last as f64) / (bottom_level_sst_num as f64)) * 100.0;
-        if amp_ratio > (self.options.max_size_amplification_percent as f64) {
+        if amp_ratio >= (self.options.max_size_amplification_percent as f64) {
+            println!(
+                "tiered compaction due to write amp : prev{} bottom {} target{}",
+                sum_except_last, bottom_level_sst_num, self.options.max_size_amplification_percent
+            );
+
             return Some(TieredCompactionTask {
                 tiers: _snapshot.levels.clone(),
                 bottom_tier_included: true,
@@ -52,24 +65,34 @@ impl TieredCompactionController {
         }
         // size ratio,找到第一个size/prev_size_sum的level, todo handle 0
         let mut counter = 0;
+        // 和checkpoint算法保持一致,即prev_sum/current_size > ratio的第一层;
+        // 但是本实现和tourial里面不一致
         for (idx, (_, ssts)) in _snapshot.levels.iter().enumerate() {
             if idx == 0 {
                 counter = counter + ssts.len();
                 continue;
             } else {
-                let ratio = (ssts.len() as f64) / (counter as f64);
-                if ratio > ((100 + self.options.size_ratio) as f64) / 100.0 {
+                let ratio = (counter as f64) / (ssts.len() as f64);
+                if ratio > ((100 + self.options.size_ratio) as f64) / 100.0
+                    && idx + 1 >= self.options.min_merge_width
+                {
+                    println!(
+                        "tiered compaction due to size ratio :idx :{}, target ratio: {}s",
+                        idx, self.options.size_ratio
+                    );
                     return Some(TieredCompactionTask {
                         tiers: _snapshot.levels.iter().take(idx + 1).cloned().collect(),
                         bottom_tier_included: idx == _snapshot.levels.len(),
                     });
                 } else {
+                    counter = counter + ssts.len();
                     continue;
                 }
             }
         }
         // reduce tier num (self.options.num_tiers - 1 = 目标levels大小)
         let n = _snapshot.levels.len() - self.options.num_tiers + 2;
+        println!("tiered compaction due to reduce iter num, size:{}", n);
         Some(TieredCompactionTask {
             tiers: _snapshot.levels.iter().take(n).cloned().collect(),
             bottom_tier_included: n >= _snapshot.levels.len(),

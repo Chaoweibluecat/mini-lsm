@@ -56,10 +56,12 @@ impl LeveledCompactionController {
             .collect::<Vec<_>>();
         let start = target_ssts.partition_point(|sst| sst.last_key() < min);
         let mut end = start;
-        while ssts[end].first_key() <= max {
+        while end < target_ssts.len() && target_ssts[end].first_key() <= max {
             end = end + 1;
         }
-        return (start..end).collect();
+        return (start..end)
+            .map(|idx| target_ssts.get(idx).unwrap().sst_id())
+            .collect();
     }
 
     pub fn generate_compaction_task(
@@ -73,6 +75,7 @@ impl LeveledCompactionController {
             });
             real_size.push(size);
         }
+        println!("genate task real size: {:?}", real_size);
         // 1.基于两条规则计算target_size
         // 1.1只有一层的targetsize < base_level_size_mb
         // 1.2 最底层的size >= base_level_size_mb, 此后每往上一层变为 1/level_size_multiplier
@@ -80,40 +83,31 @@ impl LeveledCompactionController {
             .into_iter()
             .map(|_| 0)
             .collect::<Vec<u64>>();
-        let last_target_size = real_size
-            .last()
-            .unwrap()
-            .clone()
-            .max(self.options.base_level_size_mb as u64);
-
+        let target_size_option: u64 = self.options.base_level_size_mb as u64 * 1024 * 1024;
+        let base_size_option = self.options.base_level_size_mb as u64 * 1024 * 1024;
+        let last_target_size = real_size.last().unwrap().clone().max(target_size_option);
         std::mem::replace(target_size.last_mut().unwrap(), last_target_size.clone());
 
-        for i in 1..self.options.max_levels {
-            let cur_level = real_size.len() - 1 - i;
-            let cur_level_target_size = target_size[cur_level];
-            if cur_level_target_size >= (self.options.base_level_size_mb as u64) {
-                target_size[cur_level - 1] =
+        for i in (1..self.options.max_levels).rev() {
+            let cur_level_target_size = target_size[i];
+            if cur_level_target_size > base_size_option && real_size[i] >= base_size_option {
+                target_size[i - 1] =
                     cur_level_target_size / (self.options.level_size_multiplier as u64);
             } else {
                 break;
             }
         }
+        println!("genate task target size: {:?}", target_size);
+
         let base_idx = target_size.partition_point(|size| *size == 0);
-        let l0_size = _snapshot.l0_sstables.iter().fold(0, |acc, id| {
-            acc + _snapshot.sstables.get(id).unwrap().table_size()
-        });
-
+        let l0_size = _snapshot.l0_sstables.len();
         // l0 flush to base level
-        if l0_size >= (self.options.level0_file_num_compaction_trigger as u64) {
-            let lower_level_sst_ids = self.find_overlapping_ssts(
-                _snapshot,
-                &_snapshot.l0_sstables[_snapshot.l0_sstables.len() - 1..],
-                base_idx + 1,
-            );
-
+        if l0_size >= self.options.level0_file_num_compaction_trigger {
+            let lower_level_sst_ids =
+                self.find_overlapping_ssts(_snapshot, &_snapshot.l0_sstables, base_idx + 1);
             Some(LeveledCompactionTask {
                 upper_level: None,
-                upper_level_sst_ids: vec![],
+                upper_level_sst_ids: _snapshot.l0_sstables.clone(),
                 lower_level: base_idx + 1,
                 lower_level_sst_ids,
                 is_lower_level_bottom_level: base_idx + 1 == self.options.max_levels,
@@ -177,28 +171,35 @@ impl LeveledCompactionController {
             let new_l0 = clone
                 .l0_sstables
                 .iter()
-                .filter(|id| !_task.lower_level_sst_ids.contains(id))
+                .filter(|id| !_task.upper_level_sst_ids.contains(id))
                 .map(|x| *x)
                 .collect::<Vec<_>>();
             clone.l0_sstables = new_l0;
+        } else {
+            let prev_upper = &clone.levels[_task.upper_level.unwrap() - 1].1;
+            let mut new_upper = prev_upper
+                .iter()
+                .filter(|sst_id| !_task.upper_level_sst_ids.contains(&sst_id))
+                .copied()
+                .collect::<Vec<_>>();
+            if !_in_recovery {
+                new_upper.sort_by_key(|sst_id| _snapshot.sstables.get(sst_id).unwrap().first_key());
+            }
+            clone.levels[_task.upper_level.unwrap() - 1].1 = new_upper;
         }
-        let mut new_lower = vec![];
         let prev_lower = &clone.levels[_task.lower_level - 1].1;
-        for i in 0..prev_lower.len() {
-            clone.levels[_task.lower_level - 1].1[i];
-        }
-        // concat lower_level;另一种方法是直接extend进去,然后Lower_level再进行整体排序
-        let first = prev_lower
+        let mut new_lower = prev_lower
             .iter()
-            .position(|&sst_id| sst_id == _task.lower_level_sst_ids[0])
-            .expect("no such shit found");
-        let last = prev_lower
-            .iter()
-            .position(|&sst_id| sst_id == *_task.lower_level_sst_ids.last().unwrap())
-            .expect("no such shit found");
-        new_lower.extend(&prev_lower[0..first]);
+            .filter(|id| !_task.lower_level_sst_ids.contains(&id))
+            .copied()
+            .collect::<Vec<_>>();
+        // 此处必须先插入后排序,因为可能没有交集,导致不能用交集的idx定位output的位置
         new_lower.extend(_output);
-        new_lower.extend(&prev_lower[last + 1..]);
+        // recover阶段在进行完所有的恢复对，对各个level在外层统一排序
+        if !_in_recovery {
+            new_lower.sort_by_key(|sst_id| _snapshot.sstables.get(sst_id).unwrap().first_key());
+        }
+
         clone.levels[_task.lower_level - 1].1 = new_lower;
         let mut remove_files = vec![];
         remove_files.extend(&_task.upper_level_sst_ids);

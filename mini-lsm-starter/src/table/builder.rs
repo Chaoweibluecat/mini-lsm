@@ -1,9 +1,3 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
-use std::path::Path;
-use std::sync::Arc;
-
 use super::{bloom::Bloom, BlockMeta, FileObject, SsTable};
 use crate::{
     block::BlockBuilder,
@@ -12,10 +6,13 @@ use crate::{
 };
 use anyhow::{Ok, Result};
 use bytes::{BufMut, Bytes};
+use std::path::Path;
+use std::sync::Arc;
 
 /// Builds an SSTable from key-value pairs.
 pub struct SsTableBuilder {
     builder: BlockBuilder,
+    // 当前block的first_key;过程数据
     first_key: Vec<u8>,
     last_key: Vec<u8>,
     data: Vec<u8>,
@@ -49,6 +46,10 @@ impl SsTableBuilder {
         if !self.builder.add(key, value) {
             self.finish_cur_block();
             assert!(self.builder.add(key, value));
+            // finish_cur_block会消耗当前的first_key;需要reset
+            self.first_key.extend_from_slice(&key.raw_ref());
+            self.last_key.extend_from_slice(&key.raw_ref());
+            return;
         }
 
         self.last_key.clear();
@@ -86,9 +87,12 @@ impl SsTableBuilder {
         };
         self.meta.push(meta);
         let new_block_builder = BlockBuilder::new(self.block_size);
-        let old_block = std::mem::replace(&mut self.builder, new_block_builder);
+        let old_block: BlockBuilder = std::mem::replace(&mut self.builder, new_block_builder);
         let block = old_block.build();
-        self.data.extend(block.encode());
+        let block_data = block.encode();
+        let checksum = crc32fast::hash(&block_data);
+        self.data.extend(block_data);
+        self.data.put_u32(checksum);
     }
 
     /// Builds the SSTable and writes it to the given path. Use the `FileObject` structure to manipulate the disk objects.

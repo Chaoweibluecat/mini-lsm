@@ -50,7 +50,6 @@ impl LsmIterator {
                 self.is_valid = false;
                 break;
             } else if !self.inner.value().is_empty() {
-                println!("{:?}", self.inner.value());
                 break;
             }
         }

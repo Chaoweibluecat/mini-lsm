@@ -44,7 +44,9 @@ impl BlockMeta {
         if block_meta.len() == 0 {
             return;
         }
+        // meta_data记录block数量,方便decode阶段实现
         buf.put_u16(block_meta.len() as u16);
+        let begin = buf.len();
         for meta in block_meta.iter() {
             buf.put_u32(meta.offset as u32);
             buf.put_u16(meta.first_key.len() as u16);
@@ -52,12 +54,17 @@ impl BlockMeta {
             buf.put_u16(meta.last_key.len() as u16);
             buf.extend(meta.last_key.as_key_slice().raw_ref());
         }
+        let checksum = crc32fast::hash(&buf[begin..]);
+        buf.put_u32(checksum);
     }
 
     /// Decode block meta from a buffer.
-    pub fn decode_block_meta(mut buf: impl Buf) -> Vec<BlockMeta> {
+    pub fn decode_block_meta(mut buf: &[u8]) -> Vec<BlockMeta> {
         let meta_len: u16 = buf.get_u16();
         let mut ret = Vec::with_capacity(meta_len as usize);
+        let data = &buf[..(buf.remaining() - 4)];
+        let cur_checksum = crc32fast::hash(data);
+
         for i in 0..meta_len {
             let offset = buf.get_u32() as usize;
             let first_key_len = buf.get_u16();
@@ -70,6 +77,8 @@ impl BlockMeta {
                 last_key,
             });
         }
+        let checksum = buf.get_u32();
+        assert_eq!(cur_checksum, checksum, "block meta checksum match");
         ret
     }
 }
@@ -191,7 +200,12 @@ impl SsTable {
             .get(block_idx + 1)
             .map_or(self.block_meta_offset as usize, |meta| meta.offset);
         let len = end - offset;
-        let block_data = self.file.read(offset as u64, len as u64)?;
+        let data = self.file.read(offset as u64, (len + 4) as u64)?;
+        let block_data = &data[0..(len - 4)];
+        let mut checksum = &data[(len - 4)..];
+        let actual_checksum = checksum.get_u32();
+        let cur_checksum = crc32fast::hash(block_data);
+        assert_eq!(actual_checksum, cur_checksum, "checksum doesn't match");
         Ok(Arc::new(Block::decode(&block_data)))
     }
 

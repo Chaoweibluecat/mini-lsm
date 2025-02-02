@@ -1,14 +1,14 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
-use std::{ fs::File, io::Write };
-use std::io::{ BufWriter, Read };
+use std::io::{BufWriter, Read};
 use std::path::Path;
 use std::sync::Arc;
+use std::{fs::File, io::Write};
 
-use anyhow::{ Ok, Result };
-use bytes::{ Buf, BufMut, Bytes };
+use anyhow::{Ok, Result};
+use bytes::{Buf, BufMut, Bytes};
 use crossbeam_skiplist::SkipMap;
-use parking_lot::{ Mutex };
+use parking_lot::Mutex;
 
 pub struct Wal {
     file: Arc<Mutex<BufWriter<File>>>,
@@ -16,7 +16,11 @@ pub struct Wal {
 
 impl Wal {
     pub fn create(_path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::options().read(true).append(true).create(true).open(_path)?;
+        let file = File::options()
+            .read(true)
+            .append(true)
+            .create(true)
+            .open(_path)?;
         Ok(Self {
             file: Arc::new(Mutex::new(BufWriter::new(file))),
         })
@@ -28,14 +32,21 @@ impl Wal {
         file.read_to_end(&mut buf)?;
         let mut buf_ptr = &buf[0..];
         while !buf_ptr.is_empty() {
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&buf_ptr[..2]);
             let key_len = buf_ptr.get_u16();
-            buf_ptr.advance(2);
             let key = Bytes::copy_from_slice(&buf_ptr[0..key_len as usize]);
+            hasher.update(&buf_ptr[..key_len as usize]);
             buf_ptr.advance(key_len as usize);
+            hasher.update(&buf_ptr[..2]);
             let val_len = buf_ptr.get_u16();
-            buf_ptr.advance(2);
             let val = Bytes::copy_from_slice(&buf_ptr[0..val_len as usize]);
+            hasher.update(&buf_ptr[..val_len as usize]);
+            let cur_checksum = hasher.finalize();
             buf_ptr.advance(val_len as usize);
+            let real_checksum = buf_ptr.get_u32();
+            assert_eq!(cur_checksum, real_checksum, "wal checksum mismatch");
+
             _skiplist.insert(key, val);
         }
         Ok(Self {
@@ -50,7 +61,9 @@ impl Wal {
         vec.extend(_key);
         vec.put_u16(_value.len() as u16);
         vec.extend(_value);
-        guard.get_mut().write(&vec);
+        let checksum = crc32fast::hash(&vec);
+        vec.put_u32(checksum);
+        assert_eq!(vec.len(), guard.get_mut().write(&vec)?);
         Ok(())
     }
 
