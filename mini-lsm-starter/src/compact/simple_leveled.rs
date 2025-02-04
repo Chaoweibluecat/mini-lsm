@@ -44,6 +44,7 @@ impl SimpleLeveledCompactionController {
         &self,
         _snapshot: &LsmStorageState,
     ) -> Option<SimpleLeveledCompactionTask> {
+        // ref实现中 2/4/8不会触发compact
         if _snapshot.l0_sstables.len() >= self.options.level0_file_num_compaction_trigger
             && ((_snapshot.levels[0].1.len() as f64) / (_snapshot.l0_sstables.len() as f64)
                 < (self.options.size_ratio_percent as f64) / 100.0)

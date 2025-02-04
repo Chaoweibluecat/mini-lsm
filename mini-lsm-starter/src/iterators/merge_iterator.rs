@@ -4,6 +4,7 @@
 use std::cmp::{self};
 use std::collections::binary_heap::PeekMut;
 use std::collections::BinaryHeap;
+use std::thread::current;
 
 use anyhow::{Ok, Result};
 
@@ -66,7 +67,7 @@ impl<I: 'static + for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>> StorageIt
     type KeyType<'a> = KeySlice<'a>;
 
     fn num_active_iterators(&self) -> usize {
-        self.iters.len() + 1
+        self.iters.len() + (if self.current.is_some() { 1 } else { 0 })
     }
 
     fn key(&self) -> KeySlice {

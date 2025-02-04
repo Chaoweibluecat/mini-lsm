@@ -56,7 +56,7 @@ impl BlockIterator {
 
     /// Returns the key of the current entry.
     pub fn key(&self) -> KeySlice {
-        KeySlice::from_slice(self.key.raw_ref())
+        self.key.as_key_slice()
     }
 
     /// Returns the value of the current entry.
@@ -88,7 +88,7 @@ impl BlockIterator {
     pub fn seek_to_key(&mut self, key: KeySlice) {
         // 简单期间,从0开始,向右遍历直到找到一个不小于key的 block_key
         self.seek_to_first();
-        while self.is_valid() && key.raw_ref().cmp(self.key.raw_ref()) == Ordering::Greater {
+        while self.is_valid() && key.cmp(&self.key()) == Ordering::Greater {
             self.seek_next();
         }
     }
@@ -103,8 +103,11 @@ impl BlockIterator {
         let key_offset: u16 = self.block.offsets[self.idx];
         let key_len = (&self.block.data[key_offset as usize..]).get_u16();
         let key_start = key_offset + 2;
-        let key_end: u16 = key_start + key_len;
+        let mut key_end: u16 = key_start + key_len;
         let key_slice = &self.block.data[key_start as usize..key_end as usize];
+        let mut ts = &self.block.data[key_end as usize..(key_end + 8) as usize];
+        let ts = ts.get_u64();
+        key_end += 8;
         let value_len = (&self.block.data[key_end as usize..]).get_u16();
         let value_start = key_end + 2;
         let value_end = value_start + value_len;
@@ -112,9 +115,11 @@ impl BlockIterator {
         if self.idx == 0 {
             self.first_key.clear();
             self.first_key.append(key_slice);
+            self.first_key.set_ts(ts);
         }
         self.key.clear();
         self.key.append(key_slice);
+        self.key.set_ts(ts);
     }
 
     fn seek_next(&mut self) {

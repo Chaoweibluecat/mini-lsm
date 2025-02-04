@@ -124,21 +124,34 @@ impl LsmStorageInner {
         let mut cur = SsTableBuilder::new(self.options.block_size);
         let mut result = vec![];
         while iter.is_valid() {
-            // full compact,删除的key不需要保留
-            if !iter.value().is_empty() {
-                cur.add(iter.key(), iter.value());
-                if cur.estimated_size() > self.options.target_sst_size {
-                    let sst_id = self.next_sst_id();
-                    let ss_table = cur.build(
-                        sst_id,
-                        Some(self.block_cache.clone()),
-                        self.path_of_sst(sst_id),
-                    )?;
-                    result.push(Arc::new(ss_table));
-                    cur = SsTableBuilder::new(self.options.block_size);
+            let mut need_advance = true;
+            // if !iter.value().is_empty() {
+            cur.add(iter.key(), iter.value());
+            if cur.estimated_size() > self.options.target_sst_size {
+                // 将同一个key归到同一个sst,即使超出容量
+                let cur_key = iter.key().to_key_vec();
+                while iter.is_valid() {
+                    iter.next()?;
+                    need_advance = false;
+                    if iter.is_valid() && iter.key().key_ref() == cur_key.key_ref() {
+                        cur.add(iter.key(), iter.value());
+                    } else {
+                        break;
+                    }
                 }
+                let sst_id = self.next_sst_id();
+                let ss_table = cur.build(
+                    sst_id,
+                    Some(self.block_cache.clone()),
+                    self.path_of_sst(sst_id),
+                )?;
+                result.push(Arc::new(ss_table));
+                cur = SsTableBuilder::new(self.options.block_size);
             }
-            iter.next()?;
+            // }
+            if need_advance {
+                iter.next()?;
+            }
         }
         if !cur.is_empty() {
             let sst_id = self.next_sst_id();

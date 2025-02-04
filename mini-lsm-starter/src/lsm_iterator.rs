@@ -1,7 +1,11 @@
 #![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
-use std::{ops::Bound, thread::sleep};
+use std::{
+    ops::Bound,
+    thread::sleep,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{bail, Result};
 use bytes::Bytes;
@@ -11,7 +15,7 @@ use crate::{
         concat_iterator::SstConcatIterator, merge_iterator::MergeIterator,
         two_merge_iterator::TwoMergeIterator, StorageIterator,
     },
-    key::KeySlice,
+    key::{KeySlice, KeyVec, TS_DEFAULT},
     mem_table::MemTableIterator,
     table::SsTableIterator,
 };
@@ -26,6 +30,8 @@ pub struct LsmIterator {
     inner: LsmIteratorInner,
     end_bound: Bound<Bytes>,
     is_valid: bool,
+    ts: u64,
+    prev_key: KeyVec,
 }
 
 impl LsmIterator {
@@ -35,6 +41,8 @@ impl LsmIterator {
             inner: iter,
             end_bound,
             is_valid: true,
+            ts: TS_DEFAULT,
+            prev_key: KeyVec::new(),
         };
         if iter.inner.is_valid() && iter.value().is_empty() {
             iter.inner_next()?;
@@ -44,12 +52,20 @@ impl LsmIterator {
     }
 
     fn inner_next(&mut self) -> Result<()> {
+        let mut cur_key = self.key().to_vec();
         loop {
-            let next = self.inner.next()?;
+            self.inner.next()?;
             if !self.inner.is_valid() || self.out_bound() {
                 self.is_valid = false;
                 break;
-            } else if !self.inner.value().is_empty() {
+            }
+            if self.inner.key().key_ref() == &cur_key {
+                continue;
+            }
+            if self.inner.value().is_empty() {
+                cur_key = self.inner.key().key_ref().to_vec();
+            } else {
+                cur_key = self.inner.key().key_ref().to_vec();
                 break;
             }
         }
@@ -58,8 +74,8 @@ impl LsmIterator {
 
     fn out_bound(&self) -> bool {
         match &self.end_bound {
-            Bound::Included(end) => self.inner.key() > KeySlice::from_slice(&end),
-            Bound::Excluded(end) => self.inner.key() >= KeySlice::from_slice(&end),
+            Bound::Included(end) => self.inner.key().key_ref() > end,
+            Bound::Excluded(end) => self.inner.key().key_ref() >= end,
             _ => false,
         }
     }
@@ -73,7 +89,7 @@ impl StorageIterator for LsmIterator {
     }
 
     fn key(&self) -> &[u8] {
-        &self.inner.key().raw_ref()
+        &self.inner.key().key_ref()
     }
 
     fn value(&self) -> &[u8] {

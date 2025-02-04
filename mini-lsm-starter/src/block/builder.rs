@@ -35,19 +35,23 @@ impl BlockBuilder {
     pub fn add(&mut self, key: KeySlice, value: &[u8]) -> bool {
         // offset size 2字节 + kv长度各两个字节
         if !self.is_empty()
-            && self.data.len() + 2 * self.offsets.len() + key.len() + value.len() + 6
+            && self.data.len() + 2 * self.offsets.len() + key.raw_len() + value.len() + 6
                 > self.block_size
         {
             return false;
         }
         if self.is_empty() {
-            self.first_key.append(&key.raw_ref());
+            self.first_key.set_from_slice(key);
         }
 
         let cur_offset = self.data.len();
         self.offsets.push(cur_offset as u16);
-        self.data.put_u16(key.len() as u16);
-        self.data.extend(key.raw_ref());
+
+        self.data.put_u16(key.key_len() as u16);
+
+        self.data.extend(key.key_ref());
+        // add timestamp
+        self.data.put_u64(key.ts());
         self.data.put_u16(value.len() as u16);
         self.data.extend(value);
         return true;
