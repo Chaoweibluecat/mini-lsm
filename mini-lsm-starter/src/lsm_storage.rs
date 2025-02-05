@@ -26,6 +26,7 @@ use crate::key::{self, KeySlice, TS_RANGE_BEGIN, TS_RANGE_END};
 use crate::lsm_iterator::{FusedIterator, LsmIterator};
 use crate::manifest::{self, Manifest, ManifestRecord};
 use crate::mem_table::{self, map_bound, MemTable, MemTableIterator};
+use crate::mvcc::txn::TxnIterator;
 use crate::mvcc::LsmMvccInner;
 use crate::table::{FileObject, SsTable, SsTableBuilder, SsTableIterator};
 
@@ -226,11 +227,7 @@ impl MiniLsm {
         self.inner.sync()
     }
 
-    pub fn scan(
-        &self,
-        lower: Bound<&[u8]>,
-        upper: Bound<&[u8]>,
-    ) -> Result<FusedIterator<LsmIterator>> {
+    pub fn scan(&self, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
         self.inner.scan(lower, upper)
     }
 
@@ -256,7 +253,9 @@ impl LsmStorageInner {
         self.next_sst_id
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
-
+    pub(crate) fn mvcc(&self) -> &LsmMvccInner {
+        self.mvcc.as_ref().unwrap()
+    }
     /// Start the storage engine by either loading an existing directory or creating a new one if the directory does
     /// not exist.
     pub(crate) fn open(path: impl AsRef<Path>, options: LsmStorageOptions) -> Result<Self> {
@@ -414,8 +413,11 @@ impl LsmStorageInner {
         compaction_filters.push(compaction_filter);
     }
 
+    pub fn get(self: &Arc<Self>, key: &[u8]) -> Result<Option<Bytes>> {
+        self.mvcc().new_txn(self.clone(), true).get(key)
+    }
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
-    pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
+    pub fn get_with_ts(&self, key: &[u8], read_ts: u64) -> Result<Option<Bytes>> {
         // memtable本身是lock-free的,但是这里首先还是需要获取state的读锁,
         // 因为这把读锁守护state内部,state内的memtable引用指向谁都是可变的；
         let snapshot = {
@@ -456,20 +458,24 @@ impl LsmStorageInner {
         let levels_iter = MergeIterator::create(level_iters);
 
         let merge_iter = TwoMergeIterator::create(
-            MergeIterator::create(memtable_iter),
-            TwoMergeIterator::create(MergeIterator::create(l0_iter), levels_iter)?,
+            TwoMergeIterator::create(
+                MergeIterator::create(memtable_iter),
+                MergeIterator::create(l0_iter),
+            )?,
+            levels_iter,
         )?;
+        let iter = FusedIterator::new(LsmIterator::new(merge_iter, Bound::Unbounded, read_ts)?);
 
-        if !merge_iter.is_valid() {
+        if !iter.is_valid() {
             return Ok(None);
         }
-        if merge_iter.key().key_ref() > key {
+        if iter.key() > key {
             return Ok(None);
         }
-        return if merge_iter.value().is_empty() {
+        return if iter.value().is_empty() {
             Ok(None)
         } else {
-            Ok(Some(Bytes::copy_from_slice(merge_iter.value())))
+            Ok(Some(Bytes::copy_from_slice(iter.value())))
         };
     }
 
@@ -580,9 +586,14 @@ impl LsmStorageInner {
         // 如果两个线程同时调用force_flush_next_imm_memtable,临界区在第一个read外的话,
         // 两个线程会读到同一个mmt,并导致flush两遍
         let mutex = self.state_lock.lock();
+
         // 1.读出last memtable
         let last_mmt = {
             let read1 = self.state.read();
+            // test case会出现主线程和flush线程同时调用此方法的场景,进入临界区后需要再次检查
+            if read1.imm_memtables.is_empty() {
+                return Ok(());
+            }
             read1.imm_memtables.last().unwrap().clone()
         };
 
@@ -644,10 +655,17 @@ impl LsmStorageInner {
         return smaller_than_min || greater_than_max;
     }
     /// Create an iterator over a range of keys.
-    pub fn scan(
+    pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
+        let txn = self.mvcc().new_txn(self.clone(), true);
+        txn.scan(lower, upper)
+    }
+
+    /// Create an iterator over a range of keys.
+    pub fn scan_with_ts(
         &self,
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
+        read_ts: u64,
     ) -> Result<FusedIterator<LsmIterator>> {
         let snapshot = {
             let guard = self.state.read();
@@ -704,7 +722,7 @@ impl LsmStorageInner {
         let inner_iter = TwoMergeIterator::create(two, levels_iter)?;
         // 这里是拷贝，否则数组引用逃逸出方法体
         let bytes = upper.map(|slice| Bytes::copy_from_slice(slice));
-        let iter = FusedIterator::new(LsmIterator::new(inner_iter, bytes)?);
+        let iter = FusedIterator::new(LsmIterator::new(inner_iter, bytes, read_ts)?);
         Ok(iter)
     }
 

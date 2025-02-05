@@ -1,6 +1,3 @@
-#![allow(unused_variables)] // TODO(you): remove this lint after implementing this mod
-#![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
-
 use std::{
     ops::Bound,
     thread::sleep,
@@ -30,21 +27,23 @@ pub struct LsmIterator {
     inner: LsmIteratorInner,
     end_bound: Bound<Bytes>,
     is_valid: bool,
-    ts: u64,
-    prev_key: KeyVec,
+    read_ts: u64,
 }
 
 impl LsmIterator {
-    pub(crate) fn new(iter: LsmIteratorInner, end_bound: Bound<Bytes>) -> Result<Self> {
+    pub(crate) fn new(
+        iter: LsmIteratorInner,
+        end_bound: Bound<Bytes>,
+        read_ts: u64,
+    ) -> Result<Self> {
         // new完需要先找到第一个非tombstone的节点，否则第一次调用key的节点可能是非法的
         let mut iter = Self {
             inner: iter,
             end_bound,
             is_valid: true,
-            ts: TS_DEFAULT,
-            prev_key: KeyVec::new(),
+            read_ts,
         };
-        if iter.inner.is_valid() && iter.value().is_empty() {
+        if iter.inner.is_valid() && (iter.value().is_empty() || iter.inner.key().ts() > read_ts) {
             iter.inner_next()?;
         }
         iter.is_valid = iter.is_valid && iter.inner.is_valid();
@@ -59,13 +58,12 @@ impl LsmIterator {
                 self.is_valid = false;
                 break;
             }
-            if self.inner.key().key_ref() == &cur_key {
+            if self.inner.key().key_ref() == &cur_key || self.inner.key().ts() > self.read_ts {
                 continue;
             }
             if self.inner.value().is_empty() {
                 cur_key = self.inner.key().key_ref().to_vec();
             } else {
-                cur_key = self.inner.key().key_ref().to_vec();
                 break;
             }
         }
