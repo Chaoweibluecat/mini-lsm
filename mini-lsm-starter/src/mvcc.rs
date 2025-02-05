@@ -4,10 +4,7 @@
 pub mod txn;
 mod watermark;
 
-use std::{
-    collections::{BTreeMap, HashSet},
-    sync::{atomic::AtomicBool, Arc},
-};
+use std::{ collections::{ BTreeMap, HashSet }, sync::{ atomic::AtomicBool, Arc } };
 
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
@@ -15,7 +12,7 @@ use txn::TxnIterator;
 
 use crate::lsm_storage::LsmStorageInner;
 
-use self::{txn::Transaction, watermark::Watermark};
+use self::{ txn::Transaction, watermark::Watermark };
 
 pub(crate) struct CommittedTxnData {
     pub(crate) key_hashes: HashSet<u32>,
@@ -57,8 +54,10 @@ impl LsmMvccInner {
     }
 
     pub fn new_txn(&self, inner: Arc<LsmStorageInner>, serializable: bool) -> Arc<Transaction> {
+        let read_ts = self.latest_commit_ts();
+        self.ts.lock().1.add_reader(read_ts);
         Arc::new(Transaction {
-            read_ts: self.latest_commit_ts(),
+            read_ts,
             inner: inner.clone(),
             local_storage: Arc::new(SkipMap::new()),
             committed: Arc::new(AtomicBool::new(false)),

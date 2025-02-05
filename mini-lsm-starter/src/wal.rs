@@ -1,16 +1,16 @@
 #![allow(dead_code)] // REMOVE THIS LINE after fully implementing this functionality
 
-use std::io::{BufWriter, Read};
+use std::io::{ BufWriter, Read };
 use std::path::Path;
 use std::sync::Arc;
-use std::{fs::File, io::Write};
+use std::{ fs::File, io::Write };
 
-use anyhow::{Ok, Result};
-use bytes::{Buf, BufMut, Bytes};
+use anyhow::{ Ok, Result };
+use bytes::{ Buf, BufMut, Bytes };
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
 
-use crate::key::{KeyBytes, KeySlice};
+use crate::key::{ KeyBytes, KeySlice };
 
 pub struct Wal {
     file: Arc<Mutex<BufWriter<File>>>,
@@ -18,11 +18,7 @@ pub struct Wal {
 
 impl Wal {
     pub fn create(_path: impl AsRef<Path>) -> Result<Self> {
-        let file = File::options()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(_path)?;
+        let file = File::options().read(true).append(true).create(true).open(_path)?;
         Ok(Self {
             file: Arc::new(Mutex::new(BufWriter::new(file))),
         })

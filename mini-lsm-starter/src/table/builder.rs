@@ -1,11 +1,7 @@
-use super::{bloom::Bloom, BlockMeta, FileObject, SsTable};
-use crate::{
-    block::BlockBuilder,
-    key::{Key, KeySlice, KeyVec},
-    lsm_storage::BlockCache,
-};
-use anyhow::{Ok, Result};
-use bytes::{BufMut, Bytes};
+use super::{ bloom::Bloom, BlockMeta, FileObject, SsTable };
+use crate::{ block::BlockBuilder, key::{ Key, KeySlice, KeyVec }, lsm_storage::BlockCache };
+use anyhow::{ Ok, Result };
+use bytes::{ BufMut, Bytes };
 use std::path::Path;
 use std::sync::Arc;
 
@@ -19,6 +15,7 @@ pub struct SsTableBuilder {
     pub(crate) meta: Vec<BlockMeta>,
     block_size: usize,
     hash_keys: Vec<u32>,
+    max_ts: u64,
 }
 
 impl SsTableBuilder {
@@ -32,6 +29,7 @@ impl SsTableBuilder {
             meta: vec![],
             block_size,
             hash_keys: vec![],
+            max_ts: 0,
         }
     }
     /// Adds a key-value pair to SSTable.
@@ -39,6 +37,7 @@ impl SsTableBuilder {
     /// Note: You should split a new block when the current block is full.(`std::mem::replace` may
     /// be helpful here)
     pub fn add(&mut self, key: KeySlice, value: &[u8]) {
+        self.max_ts = self.max_ts.max(key.ts());
         if self.first_key.is_empty() {
             self.first_key.set_from_slice(key);
         }
@@ -84,11 +83,11 @@ impl SsTableBuilder {
             offset: self.data.len(),
             first_key: Key::from_bytes_with_ts(
                 Bytes::copy_from_slice(old_first_key.key_ref()),
-                old_first_key.ts(),
+                old_first_key.ts()
             ),
             last_key: Key::from_bytes_with_ts(
                 Bytes::copy_from_slice(old_last_key.key_ref()),
-                old_last_key.ts(),
+                old_last_key.ts()
             ),
         };
         self.meta.push(meta);
@@ -106,7 +105,7 @@ impl SsTableBuilder {
         mut self,
         id: usize,
         block_cache: Option<Arc<BlockCache>>,
-        path: impl AsRef<Path>,
+        path: impl AsRef<Path>
     ) -> Result<SsTable> {
         // should me include current block??
 
@@ -115,6 +114,7 @@ impl SsTableBuilder {
         let meta_offset = output.len();
         BlockMeta::encode_block_meta(&self.meta, &mut output);
         output.put_u32(meta_offset as u32);
+        output.put_u64(self.max_ts);
 
         let bloom_offset = output.len() as u32;
         let bloom = if !self.hash_keys.is_empty() {

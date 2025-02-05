@@ -14,11 +14,15 @@ impl Watermark {
         }
     }
 
-    pub fn add_reader(&mut self, ts: u64) {}
+    pub fn add_reader(&mut self, ts: u64) {
+        self.readers.insert(ts, 0);
+    }
 
-    pub fn remove_reader(&mut self, ts: u64) {}
+    pub fn remove_reader(&mut self, ts: u64) {
+        self.readers.remove(&ts);
+    }
 
     pub fn watermark(&self) -> Option<u64> {
-        Some(0)
+        self.readers.first_key_value().map(|e| e.0.clone())
     }
 }
