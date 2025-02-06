@@ -2,9 +2,12 @@
 #![allow(dead_code)] // TODO(you): remove this lint after implementing this mod
 
 pub mod txn;
-mod watermark;
+pub(crate) mod watermark;
 
-use std::{ collections::{ BTreeMap, HashSet }, sync::{ atomic::AtomicBool, Arc } };
+use std::{
+    collections::{BTreeMap, HashSet},
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use crossbeam_skiplist::SkipMap;
 use parking_lot::Mutex;
@@ -12,7 +15,7 @@ use txn::TxnIterator;
 
 use crate::lsm_storage::LsmStorageInner;
 
-use self::{ txn::Transaction, watermark::Watermark };
+use self::{txn::Transaction, watermark::Watermark};
 
 pub(crate) struct CommittedTxnData {
     pub(crate) key_hashes: HashSet<u32>,

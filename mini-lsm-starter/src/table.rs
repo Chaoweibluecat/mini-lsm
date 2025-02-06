@@ -6,18 +6,18 @@ mod builder;
 mod iterator;
 
 use std::fs::File;
-use std::io::{ Read, Seek };
+use std::io::{Read, Seek};
 use std::os::unix::fs::FileExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::{ anyhow, bail, Ok, Result };
+use anyhow::{anyhow, bail, Ok, Result};
 pub use builder::SsTableBuilder;
-use bytes::{ Buf, BufMut, Bytes };
+use bytes::{Buf, BufMut, Bytes};
 pub use iterator::SsTableIterator;
 
 use crate::block::Block;
-use crate::key::{ self, KeyBytes, KeySlice };
+use crate::key::{self, KeyBytes, KeySlice};
 use crate::lsm_storage::BlockCache;
 
 use self::bloom::Bloom;
@@ -39,7 +39,7 @@ impl BlockMeta {
     pub fn encode_block_meta(
         block_meta: &[BlockMeta],
         #[allow(clippy::ptr_arg)] // remove this allow after you finish
-        buf: &mut Vec<u8>
+        buf: &mut Vec<u8>,
     ) {
         if block_meta.len() == 0 {
             return;
@@ -111,7 +111,10 @@ impl FileObject {
     pub fn create(path: &Path, data: Vec<u8>) -> Result<Self> {
         std::fs::write(path, &data)?;
         File::open(path)?.sync_all()?;
-        Ok(FileObject(Some(File::options().read(true).write(false).open(path)?), data.len() as u64))
+        Ok(FileObject(
+            Some(File::options().read(true).write(false).open(path)?),
+            data.len() as u64,
+        ))
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -160,7 +163,7 @@ impl SsTable {
         let ts_offset = bloom_offset - 8;
         let max_ts = (&content[ts_offset..ts_offset + 8]).get_u64();
         let meta_offset = (&content[ts_offset - 4..]).get_u32() as usize;
-        let block_meta = BlockMeta::decode_block_meta(&content[meta_offset..bloom_offset - 4]);
+        let block_meta = BlockMeta::decode_block_meta(&content[meta_offset..ts_offset - 4]);
 
         let first_key = block_meta[0].first_key.clone();
         let last_key = block_meta.last().unwrap().last_key.clone();
@@ -173,7 +176,7 @@ impl SsTable {
             first_key,
             last_key,
             bloom,
-            max_ts: 0,
+            max_ts,
         })
     }
 
@@ -182,7 +185,7 @@ impl SsTable {
         id: usize,
         file_size: u64,
         first_key: KeyBytes,
-        last_key: KeyBytes
+        last_key: KeyBytes,
     ) -> Self {
         Self {
             file: FileObject(None, file_size),
@@ -201,7 +204,8 @@ impl SsTable {
     pub fn read_block(&self, block_idx: usize) -> Result<Arc<Block>> {
         // 通过blockmeta中的当前block和下一段的block offset 确定读出的位置
         let offset = self.block_meta[block_idx].offset;
-        let end = self.block_meta
+        let end = self
+            .block_meta
             .get(block_idx + 1)
             .map_or(self.block_meta_offset as usize, |meta| meta.offset);
         let len = end - offset;
@@ -217,7 +221,8 @@ impl SsTable {
     /// Read a block from disk, with block cache. (Day 4)
     pub fn read_block_cached(&self, block_idx: usize) -> Result<Arc<Block>> {
         if self.block_cache.is_some() {
-            let block = self.block_cache
+            let block = self
+                .block_cache
                 .as_ref()
                 .unwrap()
                 .try_get_with((self.id, block_idx), || self.read_block(block_idx));

@@ -44,14 +44,20 @@ impl LsmIterator {
             read_ts,
         };
         if iter.inner.is_valid() && (iter.value().is_empty() || iter.inner.key().ts() > read_ts) {
-            iter.inner_next()?;
+            iter.inner_next(true)?;
         }
         iter.is_valid = iter.is_valid && iter.inner.is_valid();
         Ok(iter)
     }
 
-    fn inner_next(&mut self) -> Result<()> {
-        let mut cur_key = self.key().to_vec();
+    fn inner_next(&mut self, initializing: bool) -> Result<()> {
+        // 初始化且第一个key因为mvcc非法时,当前key为空（代表要找后面第一个合法的key)
+        let mut cur_key = if initializing && self.inner.key().ts() > self.read_ts {
+            vec![]
+        } else {
+            // 当前key合法,记录当前key
+            self.key().to_vec()
+        };
         loop {
             self.inner.next()?;
             if !self.inner.is_valid() || self.out_bound() {
@@ -96,7 +102,7 @@ impl StorageIterator for LsmIterator {
 
     fn next(&mut self) -> Result<()> {
         // loop直到下一个非tombstone节点
-        self.inner_next()
+        self.inner_next(false)
     }
 
     fn num_active_iterators(&self) -> usize {

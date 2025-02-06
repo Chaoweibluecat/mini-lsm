@@ -1,7 +1,11 @@
-use super::{ bloom::Bloom, BlockMeta, FileObject, SsTable };
-use crate::{ block::BlockBuilder, key::{ Key, KeySlice, KeyVec }, lsm_storage::BlockCache };
-use anyhow::{ Ok, Result };
-use bytes::{ BufMut, Bytes };
+use super::{bloom::Bloom, BlockMeta, FileObject, SsTable};
+use crate::{
+    block::BlockBuilder,
+    key::{Key, KeySlice, KeyVec},
+    lsm_storage::BlockCache,
+};
+use anyhow::{Ok, Result};
+use bytes::{BufMut, Bytes};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -83,11 +87,11 @@ impl SsTableBuilder {
             offset: self.data.len(),
             first_key: Key::from_bytes_with_ts(
                 Bytes::copy_from_slice(old_first_key.key_ref()),
-                old_first_key.ts()
+                old_first_key.ts(),
             ),
             last_key: Key::from_bytes_with_ts(
                 Bytes::copy_from_slice(old_last_key.key_ref()),
-                old_last_key.ts()
+                old_last_key.ts(),
             ),
         };
         self.meta.push(meta);
@@ -105,7 +109,7 @@ impl SsTableBuilder {
         mut self,
         id: usize,
         block_cache: Option<Arc<BlockCache>>,
-        path: impl AsRef<Path>
+        path: impl AsRef<Path>,
     ) -> Result<SsTable> {
         // should me include current block??
 
@@ -142,7 +146,7 @@ impl SsTableBuilder {
             first_key,
             last_key,
             bloom,
-            max_ts: 0,
+            max_ts: self.max_ts,
         })
     }
 
