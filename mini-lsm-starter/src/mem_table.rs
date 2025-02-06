@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
-use anyhow::{Ok, Result};
+use anyhow::{ Ok, Result };
 use bytes::Bytes;
 use clap::builder;
 use crossbeam_skiplist::SkipMap;
@@ -14,7 +14,7 @@ use ouroboros::self_referencing;
 use serde::de::value;
 
 use crate::iterators::StorageIterator;
-use crate::key::{Key, KeyBytes, KeySlice, TS_DEFAULT};
+use crate::key::{ Key, KeyBytes, KeySlice, TS_DEFAULT };
 use crate::table::SsTableBuilder;
 use crate::wal::Wal;
 
@@ -49,7 +49,11 @@ impl MemTable {
         }
     }
     pub fn max_ts(&self) -> u64 {
-        self.map.iter().map(|k| k.key().ts()).max().unwrap_or(0)
+        self.map
+            .iter()
+            .map(|k| k.key().ts())
+            .max()
+            .unwrap_or(0)
     }
 
     /// Create a new mem-table with WAL
@@ -86,19 +90,17 @@ impl MemTable {
     pub fn for_testing_scan_slice(
         &self,
         lower: Bound<&[u8]>,
-        upper: Bound<&[u8]>,
+        upper: Bound<&[u8]>
     ) -> MemTableIterator {
         self.scan(
             lower.map(|x| KeySlice::from_slice(x, TS_DEFAULT)),
-            upper.map(|x| KeySlice::from_slice(x, TS_DEFAULT)),
+            upper.map(|x| KeySlice::from_slice(x, TS_DEFAULT))
         )
     }
 
     /// Get a value by key.
     pub fn get(&self, key: KeySlice) -> Option<Bytes> {
-        self.map
-            .get(&key.as_key_bytes())
-            .map(|entry| entry.value().clone())
+        self.map.get(&key.as_key_bytes()).map(|entry| entry.value().clone())
     }
 
     /// Put a key-value pair into the mem-table.
@@ -110,20 +112,20 @@ impl MemTable {
         self.map.insert(
             // map生命周期比入参长,这里是一定要拷贝的;不然put结束后bytes指针指向无效地址
             key.to_key_vec().into_key_bytes(),
-            Bytes::copy_from_slice(value),
+            Bytes::copy_from_slice(value)
         );
         if let Some(wal) = self.wal.as_ref() {
             wal.put(key, value)?;
         }
         self.approximate_size.fetch_add(
             key.raw_len() + value.len(),
-            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Relaxed
         );
         Ok(())
     }
 
     /// Implement this in week 3, day 5.
-    pub fn put_batch(&self, _data: &[(KeySlice, &[u8])]) -> Result<()> {
+    pub fn put_batch(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
         unimplemented!()
     }
 
@@ -139,11 +141,10 @@ impl MemTable {
         let lower = map_bound(lower);
         let upper = map_bound(upper);
 
-        let mut ret = MemTableIterator::new(
-            self.map.clone(),
-            |map| map.range((lower, upper)),
-            (KeyBytes::new(), Bytes::new()),
-        );
+        let mut ret = MemTableIterator::new(self.map.clone(), |map| map.range((lower, upper)), (
+            KeyBytes::new(),
+            Bytes::new(),
+        ));
 
         ret.with_mut(|ret| {
             if let Some(kv) = ret.iter.next() {
@@ -169,8 +170,7 @@ impl MemTable {
     }
 
     pub fn approximate_size(&self) -> usize {
-        self.approximate_size
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.approximate_size.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Only use this function when closing the database
@@ -184,7 +184,7 @@ type SkipMapRangeIter<'a> = crossbeam_skiplist::map::Range<
     KeyBytes,
     (Bound<KeyBytes>, Bound<KeyBytes>),
     KeyBytes,
-    Bytes,
+    Bytes
 >;
 
 /// An iterator over a range of `SkipMap`. This is a self-referential structure and please refer to week 1, day 2
@@ -226,9 +226,9 @@ impl StorageIterator for MemTableIterator {
                 .unwrap_or_else(|| (KeyBytes::new(), Bytes::new()))
         });
 
-        self.with_item_mut(|item| {
-            *item = kv;
-            Ok(())
-        })
+        self.with_mut(|iter| {
+            *iter.item = kv;
+        });
+        Ok(())
     }
 }

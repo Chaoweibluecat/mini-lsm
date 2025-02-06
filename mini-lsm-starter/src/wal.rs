@@ -34,8 +34,10 @@ impl Wal {
         file.read_to_end(&mut buf)?;
         let mut buf_ptr = &buf[0..];
         while !buf_ptr.is_empty() {
+            let batch_size = buf_ptr.get_u32();
             let mut hasher = crc32fast::Hasher::new();
-            // key_len
+            let mut kvs = vec![];
+            for _ in 0..batch_size {
             hasher.update(&buf_ptr[..2]);
             let key_len = buf_ptr.get_u16();
             //key_data
@@ -50,34 +52,54 @@ impl Wal {
             let val_len = buf_ptr.get_u16();
             let val = Bytes::copy_from_slice(&buf_ptr[0..val_len as usize]);
             hasher.update(&buf_ptr[..val_len as usize]);
-            let cur_checksum = hasher.finalize();
             buf_ptr.advance(val_len as usize);
+            kvs.push((KeyBytes::from_bytes_with_ts(key, ts), val));
+            }
             let real_checksum = buf_ptr.get_u32();
-            assert_eq!(cur_checksum, real_checksum, "wal checksum mismatch");
-            _skiplist.insert(KeyBytes::from_bytes_with_ts(key, ts), val);
+            let cur_checksum = hasher.finalize();
+            assert_eq!(real_checksum, cur_checksum, "wal checksum doesn't match");
+            for (k, v) in kvs {
+            _skiplist.insert(k,v);
+            }
         }
         Ok(Self {
             file: Arc::new(Mutex::new(BufWriter::new(file))),
         })
     }
 
-    pub fn put(&self, key: KeySlice, _value: &[u8]) -> Result<()> {
-        let mut guard = self.file.lock();
-        let mut vec: Vec<u8> = vec![];
-        vec.put_u16(key.key_len() as u16);
-        vec.extend(key.key_ref());
-        vec.put_u64(key.ts());
-        vec.put_u16(_value.len() as u16);
-        vec.extend(_value);
-        let checksum = crc32fast::hash(&vec);
-        vec.put_u32(checksum);
-        assert_eq!(vec.len(), guard.get_mut().write(&vec)?);
-        Ok(())
+    pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
+        // let mut guard = self.file.lock();
+        // let mut vec: Vec<u8> = vec![];
+        // vec.put_u16(key.key_len() as u16);
+        // vec.extend(key.key_ref());
+        // vec.put_u64(key.ts());
+        // vec.put_u16(value.len() as u16);
+        // vec.extend(value);
+        // let checksum = crc32fast::hash(&vec);
+        // vec.put_u32(checksum);
+        // assert_eq!(vec.len(), guard.get_mut().write(&vec)?);
+        let mut key_bytes = key.key_ref().to_vec();
+        key_bytes.put_u64(key.ts());
+        self.put_batch(&vec![(&key_bytes[0..], value)])
     }
 
     /// Implement this in week 3, day 5.
-    pub fn put_batch(&self, _data: &[(&[u8], &[u8])]) -> Result<()> {
-        unimplemented!()
+    pub fn put_batch(&self, data: &[(&[u8], &[u8])]) -> Result<()> {
+        let mut guard = self.file.lock();
+        let mut vec: Vec<u8> = vec![];
+        let batch_size = data.len() as u32;
+        vec.put_u32(batch_size);
+        for &(key, value) in data {
+        vec.put_u16((key.len() - 8) as u16);
+        vec.extend(key);
+        vec.put_u16(value.len() as u16);
+        vec.extend(value);
+        }
+        let checksum = crc32fast::hash(&vec[4..]);
+        vec.put_u32(checksum);
+        assert_eq!(vec.len(), guard.get_mut().write(&vec)?);
+        Ok(())
+        
     }
 
     pub fn sync(&self) -> Result<()> {
