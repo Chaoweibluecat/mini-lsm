@@ -38,28 +38,28 @@ impl Wal {
             let mut hasher = crc32fast::Hasher::new();
             let mut kvs = vec![];
             for _ in 0..batch_size {
-            hasher.update(&buf_ptr[..2]);
-            let key_len = buf_ptr.get_u16();
-            //key_data
-            let key = Bytes::copy_from_slice(&buf_ptr[0..key_len as usize]);
-            hasher.update(&buf_ptr[..key_len as usize]);
-            buf_ptr.advance(key_len as usize);
-            //ts
-            hasher.update(&buf_ptr[..8]);
-            let ts = buf_ptr.get_u64();
-            //val
-            hasher.update(&buf_ptr[..2]);
-            let val_len = buf_ptr.get_u16();
-            let val = Bytes::copy_from_slice(&buf_ptr[0..val_len as usize]);
-            hasher.update(&buf_ptr[..val_len as usize]);
-            buf_ptr.advance(val_len as usize);
-            kvs.push((KeyBytes::from_bytes_with_ts(key, ts), val));
+                hasher.update(&buf_ptr[..2]);
+                let key_len = buf_ptr.get_u16();
+                //key_data
+                let key = Bytes::copy_from_slice(&buf_ptr[0..key_len as usize]);
+                hasher.update(&buf_ptr[..key_len as usize]);
+                buf_ptr.advance(key_len as usize);
+                //ts
+                hasher.update(&buf_ptr[..8]);
+                let ts = buf_ptr.get_u64();
+                //val
+                hasher.update(&buf_ptr[..2]);
+                let val_len = buf_ptr.get_u16();
+                let val = Bytes::copy_from_slice(&buf_ptr[0..val_len as usize]);
+                hasher.update(&buf_ptr[..val_len as usize]);
+                buf_ptr.advance(val_len as usize);
+                kvs.push((KeyBytes::from_bytes_with_ts(key, ts), val));
             }
             let real_checksum = buf_ptr.get_u32();
             let cur_checksum = hasher.finalize();
             assert_eq!(real_checksum, cur_checksum, "wal checksum doesn't match");
             for (k, v) in kvs {
-            _skiplist.insert(k,v);
+                _skiplist.insert(k, v);
             }
         }
         Ok(Self {
@@ -90,16 +90,15 @@ impl Wal {
         let batch_size = data.len() as u32;
         vec.put_u32(batch_size);
         for &(key, value) in data {
-        vec.put_u16((key.len() - 8) as u16);
-        vec.extend(key);
-        vec.put_u16(value.len() as u16);
-        vec.extend(value);
+            vec.put_u16((key.len() - 8) as u16);
+            vec.extend(key);
+            vec.put_u16(value.len() as u16);
+            vec.extend(value);
         }
         let checksum = crc32fast::hash(&vec[4..]);
         vec.put_u32(checksum);
         assert_eq!(vec.len(), guard.get_mut().write(&vec)?);
         Ok(())
-        
     }
 
     pub fn sync(&self) -> Result<()> {

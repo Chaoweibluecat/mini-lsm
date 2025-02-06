@@ -4,7 +4,10 @@
 use std::{
     collections::HashSet,
     ops::Bound,
-    sync::{atomic::{AtomicBool, Ordering}, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 use anyhow::{Ok, Result};
@@ -31,53 +34,55 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
-                assert!(!self.committed.load(Ordering::SeqCst), "committed ts");
+        assert!(!self.committed.load(Ordering::SeqCst), "committed ts");
 
-         // 先从 local_storage 中查找
-    if let Some(value) = self.local_storage.get(key).map(|e| e.value().clone()) {
-        return Ok(Some(value));
-    }
+        // 先从 local_storage 中查找
+        if let Some(value) = self.local_storage.get(key).map(|e| e.value().clone()) {
+            return Ok(Some(value));
+        }
 
-    // 如果 local_storage 中没有，则调用 inner.get_with_ts
-    self.inner.get_with_ts(key, self.read_ts)
-}
-/// Create a bound of `Bytes` from a bound of `&[u8]`.
-pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
-    match bound {
-        Bound::Included(x) => Bound::Included(Bytes::copy_from_slice(x)),
-        Bound::Excluded(x) => Bound::Excluded(Bytes::copy_from_slice(x)),
-        Bound::Unbounded => Bound::Unbounded,
+        // 如果 local_storage 中没有，则调用 inner.get_with_ts
+        self.inner.get_with_ts(key, self.read_ts)
     }
-}
+    /// Create a bound of `Bytes` from a bound of `&[u8]`.
+    pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
+        match bound {
+            Bound::Included(x) => Bound::Included(Bytes::copy_from_slice(x)),
+            Bound::Excluded(x) => Bound::Excluded(Bytes::copy_from_slice(x)),
+            Bound::Unbounded => Bound::Unbounded,
+        }
+    }
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
-                assert!(!self.committed.load(Ordering::SeqCst), "committed ts");
+        assert!(!self.committed.load(Ordering::SeqCst), "committed ts");
 
-        let mut local = TxnLocalIterator::new(self.local_storage.clone(), 
-                |storage| storage.range(
-                    (lower.map(|x| Bytes::copy_from_slice(x)),
-                     upper.map(|x| Bytes::copy_from_slice(x)))), 
-                (Bytes::new(), Bytes::new()));
-        local.next();
+        let mut local = TxnLocalIterator::new(
+            self.local_storage.clone(),
+            |storage| {
+                storage.range((
+                    lower.map(|x| Bytes::copy_from_slice(x)),
+                    upper.map(|x| Bytes::copy_from_slice(x)),
+                ))
+            },
+            (Bytes::new(), Bytes::new()),
+        );
+        local.next()?;
         TxnIterator::create(
             self.clone(),
-            TwoMergeIterator::create(
-            local, 
-                self.inner.scan_with_ts(lower, upper, self.read_ts)?)?
-            ,
+            TwoMergeIterator::create(local, self.inner.scan_with_ts(lower, upper, self.read_ts)?)?,
         )
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
         assert!(!self.committed.load(Ordering::SeqCst), "committed ts");
-        self.local_storage.insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
-        
+        self.local_storage
+            .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
     }
 
     pub fn delete(&self, key: &[u8]) {
-                assert!(!self.committed.load(Ordering::SeqCst), "committed ts");
+        assert!(!self.committed.load(Ordering::SeqCst), "committed ts");
 
-                self.local_storage.insert(Bytes::copy_from_slice(key), Bytes::new());
-
+        self.local_storage
+            .insert(Bytes::copy_from_slice(key), Bytes::new());
     }
 
     pub fn commit(&self) -> Result<()> {
@@ -87,10 +92,13 @@ pub(crate) fn map_bound(bound: Bound<&[u8]>) -> Bound<Bytes> {
             if entry.value().is_empty() {
                 batch_record.push(WriteBatchRecord::Del(entry.key().clone()));
             } else {
-                batch_record.push(WriteBatchRecord::Put(entry.key().clone(), entry.value().clone()));
+                batch_record.push(WriteBatchRecord::Put(
+                    entry.key().clone(),
+                    entry.value().clone(),
+                ));
             }
         }
-        self.inner.write_batch(&batch_record);
+        self.inner.write_batch(&batch_record)?;
         Ok(())
     }
 }
@@ -128,7 +136,7 @@ impl StorageIterator for TxnLocalIterator {
     }
 
     fn is_valid(&self) -> bool {
-        self.borrow_item().0.is_empty()
+        !self.borrow_item().0.is_empty()
     }
 
     // TxnLocalIterator需要自行消化delete逻辑（lsm整体的delete逻辑在lsm_iter中）
@@ -157,9 +165,10 @@ pub struct TxnIterator {
 }
 
 impl TxnIterator {
-    pub fn create(txn: Arc<Transaction>,
-         iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>) -> Result<Self> {
-        
+    pub fn create(
+        txn: Arc<Transaction>,
+        iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
+    ) -> Result<Self> {
         Ok(Self {
             txn: txn.clone(),
             iter,
@@ -186,6 +195,7 @@ impl StorageIterator for TxnIterator {
     }
 
     fn next(&mut self) -> Result<()> {
+        self.iter.next()?;
         while self.iter.is_valid() && self.iter.value().is_empty() {
             self.iter.next()?
         }
