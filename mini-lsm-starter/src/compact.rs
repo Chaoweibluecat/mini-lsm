@@ -127,35 +127,48 @@ impl LsmStorageInner {
         let water_mark = self.mvcc().watermark();
         // 承载当前key,每次要加入新key时和当前key对比
         let mut cur_key: Vec<u8> = vec![];
+        let mut latest_key_under_watermark_added = false;
         while iter.is_valid() {
             let mut need_advance = true;
-            if iter.key().key_ref() == cur_key && iter.key().ts() < water_mark {
-                iter.next()?;
-                continue;
+            if iter.key().key_ref() != &cur_key {
+                latest_key_under_watermark_added = false;
             }
-            if !bottom_level_included || !iter.value().is_empty() {
+            if iter.key().ts() > water_mark {
                 cur.add(iter.key(), iter.value());
+                // reset current_key
+                cur_key.clear();
+                cur_key.extend(iter.key().key_ref());
+            } else if !latest_key_under_watermark_added {
+                if !bottom_level_included || !iter.value().is_empty() {
+                    cur.add(iter.key(), iter.value());
+                }
+                // reset current_key
+                cur_key.clear();
+                cur_key.extend(iter.key().key_ref());
+                latest_key_under_watermark_added = true;
             }
-            // reset current_key
-            cur_key.clear();
-            cur_key.extend(iter.key().key_ref());
 
             if cur.estimated_size() > self.options.target_sst_size {
                 // 即便超出target_size,也把相同key放入同一个sst
                 while iter.is_valid() {
                     iter.next()?;
                     need_advance = false;
-                    if iter.is_valid() &&
-                        iter.key().key_ref() == &cur_key &&
-                        // append相同key时也需要ts大于活跃读事务
-                        iter.key().ts() >= water_mark
-                    {
-                        cur.add(iter.key(), iter.value());
+                    if iter.is_valid() && iter.key().key_ref() == &cur_key {
+                        if iter.key().ts() > water_mark {
+                            cur.add(iter.key(), iter.value());
+                            continue;
+                        } else if !latest_key_under_watermark_added {
+                            if !bottom_level_included || !iter.value().is_empty() {
+                                cur.add(iter.key(), iter.value());
+                            }
+                            latest_key_under_watermark_added = true;
+                        } else {
+                            continue;
+                        }
                     } else {
                         // append出口
                         // 1.iter不再valid
                         // 2.iter指向了下一个key,下一次迭代正常执行
-                        // 3.iter指向了一个ts比较小的same key,下一次迭代中会走第一个逻辑分支的continue
                         break;
                     }
                 }

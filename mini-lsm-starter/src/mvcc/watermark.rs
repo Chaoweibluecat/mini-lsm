@@ -19,9 +19,9 @@ impl Watermark {
     }
 
     pub fn remove_reader(&mut self, ts: u64) {
-        let counter = self.readers.entry(ts).or_insert(0);
+        let counter = self.readers.get_mut(&ts).unwrap();
         *counter -= 1;
-        if *counter <= 0 {
+        if *counter == 0 {
             self.readers.remove(&ts);
         }
     }
