@@ -493,29 +493,29 @@ impl LsmStorageInner {
         for record in batch {
             match record {
                 WriteBatchRecord::Del(key) => {
-                kvs.push((KeySlice::from_slice(key.as_ref(), ts), &[]));
+                    kvs.push((KeySlice::from_slice(key.as_ref(), ts), &[]));
                 }
                 WriteBatchRecord::Put(key, value) => {
-                kvs.push((KeySlice::from_slice(key.as_ref(), ts), value.as_ref()));
+                    kvs.push((KeySlice::from_slice(key.as_ref(), ts), value.as_ref()));
                 }
             };
         }
-            let size = {
-                let guard = self.state.read();
+        let size = {
+            let guard = self.state.read();
             guard.memtable.put_batch(&kvs);
             guard.memtable.approximate_size()
-            };
-            
-            if size > self.options.target_sst_size {
-                let state_lock = self.state_lock.lock();
-                // 进同步块以后state rwlock本身守护的对memtable的引用可能变了, 需要重新获取引用
-                let guard = self.state.read();
-                if guard.memtable.approximate_size() > self.options.target_sst_size {
-                    drop(guard);
-                    self.force_freeze_memtable(&state_lock)?;
-                }
+        };
+
+        if size > self.options.target_sst_size {
+            let state_lock = self.state_lock.lock();
+            // 进同步块以后state rwlock本身守护的对memtable的引用可能变了, 需要重新获取引用
+            let guard = self.state.read();
+            if guard.memtable.approximate_size() > self.options.target_sst_size {
+                drop(guard);
+                self.force_freeze_memtable(&state_lock)?;
             }
-        
+        }
+
         self.mvcc.as_ref().unwrap().update_commit_ts(ts);
         Ok(())
     }

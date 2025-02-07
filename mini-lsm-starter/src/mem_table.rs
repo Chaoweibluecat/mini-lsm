@@ -116,23 +116,24 @@ impl MemTable {
         let mut size = 0;
         for &(key, value) in data {
             self.map.insert(
-            // map生命周期比入参长,这里是一定要拷贝的;不然put结束后bytes指针指向无效地址
-            key.to_key_vec().into_key_bytes(),
-            Bytes::copy_from_slice(value),
-        );
-        let mut wal_key = key.key_ref().to_vec();
-        wal_key.put_u64(key.ts());
-        wal_input.push((wal_key, value));
-        size += key.raw_len() + value.len();
+                // map生命周期比入参长,这里是一定要拷贝的;不然put结束后bytes指针指向无效地址
+                key.to_key_vec().into_key_bytes(),
+                Bytes::copy_from_slice(value),
+            );
+            let mut wal_key = key.key_ref().to_vec();
+            wal_key.put_u64(key.ts());
+            wal_input.push((wal_key, value));
+            size += key.raw_len() + value.len();
         }
-        let wal_input_ref = wal_input.iter().map(|kv| (&kv.0[0..], kv.1)).collect::<Vec<_>>();
-            if let Some(wal) = self.wal.as_ref() {
-            wal.put_batch(&wal_input_ref);
+        let wal_input_ref = wal_input
+            .iter()
+            .map(|kv| (&kv.0[0..], kv.1))
+            .collect::<Vec<_>>();
+        if let Some(wal) = self.wal.as_ref() {
+            wal.put_batch(&wal_input_ref)?;
         }
-        self.approximate_size.fetch_add(
-            size,
-            std::sync::atomic::Ordering::Relaxed,
-        );
+        self.approximate_size
+            .fetch_add(size, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

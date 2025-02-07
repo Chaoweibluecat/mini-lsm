@@ -10,7 +10,7 @@ use std::{
     },
 };
 
-use anyhow::{Ok, Result};
+use anyhow::{bail, Ok, Result};
 use bytes::Bytes;
 use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
@@ -21,6 +21,8 @@ use crate::{
     lsm_iterator::{FusedIterator, LsmIterator},
     lsm_storage::{LsmStorageInner, WriteBatchRecord},
 };
+
+use super::CommittedTxnData;
 
 pub struct Transaction {
     pub(crate) read_ts: u64,
@@ -35,7 +37,10 @@ pub struct Transaction {
 impl Transaction {
     pub fn get(&self, key: &[u8]) -> Result<Option<Bytes>> {
         assert!(!self.committed.load(Ordering::SeqCst), "committed ts");
-
+        if let Some(key_hashes) = self.key_hashes.as_ref() {
+            let mut guard = key_hashes.lock();
+            guard.1.insert(farmhash::fingerprint32(key));
+        }
         // 先从 local_storage 中查找
         if let Some(value) = self.local_storage.get(key).map(|e| e.value().clone()) {
             if value.is_empty() {
@@ -70,26 +75,40 @@ impl Transaction {
             (Bytes::new(), Bytes::new()),
         );
         local.next()?;
-        TxnIterator::create(
+        let result = TxnIterator::create(
             self.clone(),
             TwoMergeIterator::create(local, self.inner.scan_with_ts(lower, upper, self.read_ts)?)?,
-        )
+        )?;
+        if let Some(key_hashes) = self.key_hashes.as_ref() {
+            if result.is_valid() {
+                let mut guard = key_hashes.lock();
+                guard.1.insert(farmhash::fingerprint32(result.key()));
+            }
+        }
+        Ok(result)
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) {
         assert!(!self.committed.load(Ordering::SeqCst), "committed ts");
+        if let Some(key_hashes) = self.key_hashes.as_ref() {
+            let mut guard = key_hashes.lock();
+            guard.0.insert(farmhash::fingerprint32(key));
+        }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::copy_from_slice(value));
     }
 
     pub fn delete(&self, key: &[u8]) {
         assert!(!self.committed.load(Ordering::SeqCst), "committed ts");
-
+        if let Some(key_hashes) = self.key_hashes.as_ref() {
+            let mut guard = key_hashes.lock();
+            guard.0.insert(farmhash::fingerprint32(key));
+        }
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::new());
     }
 
-    pub fn commit(&self) -> Result<()> {
+    pub fn write_batch_inner(&self) -> Result<()> {
         let iter = self.local_storage.iter();
         let mut batch_record = vec![];
         for entry in iter {
@@ -104,6 +123,40 @@ impl Transaction {
         }
         self.inner.write_batch(&batch_record)?;
         Ok(())
+    }
+    pub fn commit(&self) -> Result<()> {
+        // enable serialize check
+        if let Some(work_set) = self.key_hashes.as_ref() {
+            let mut work_set = work_set.lock();
+            let _lck = self.inner.mvcc().commit_lock.lock();
+            if !work_set.0.is_empty() {
+                let expect = self.inner.mvcc().latest_commit_ts() + 1;
+                let mut txns = self.inner.mvcc().committed_txns.lock();
+                let intersect_txns =
+                    txns.range((Bound::Excluded(self.read_ts), Bound::Excluded(expect)));
+                let committable = true;
+                for (_, commit_data) in intersect_txns {
+                    let any_conflict = commit_data
+                        .key_hashes
+                        .iter()
+                        .any(|hash| work_set.0.contains(hash));
+                    if any_conflict {
+                        bail!("txn commit failed, conflict with previous txn");
+                    }
+                }
+                txns.insert(
+                    expect,
+                    CommittedTxnData {
+                        key_hashes: std::mem::replace(&mut work_set.0, HashSet::new()),
+                        read_ts: self.read_ts,
+                        commit_ts: expect,
+                    },
+                );
+            }
+
+            self.write_batch_inner()?;
+        }
+        self.write_batch_inner()
     }
 }
 
@@ -143,16 +196,11 @@ impl StorageIterator for TxnLocalIterator {
         !self.borrow_item().0.is_empty()
     }
 
-    // TxnLocalIterator需要自行消化delete逻辑（lsm整体的delete逻辑在lsm_iter中）
+    // TxnLocalIterator不能自行消化delete逻辑;
+    // 本地删了 + sst里还有老版本的时候,local_iter有义务返回被删除key,代表最新版本
     fn next(&mut self) -> Result<()> {
         let kv = self.with_iter_mut(|iter| {
-            let mut entry = iter.next();
-            while let Some(e) = &entry {
-                if !e.value().is_empty() {
-                    break;
-                }
-                entry = iter.next()
-            }
+            let entry = iter.next();
             entry
                 .map(|e| (e.key().clone(), e.value().clone()))
                 .unwrap_or_else(|| (Bytes::new(), Bytes::new()))
@@ -171,8 +219,11 @@ pub struct TxnIterator {
 impl TxnIterator {
     pub fn create(
         txn: Arc<Transaction>,
-        iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
+        mut iter: TwoMergeIterator<TxnLocalIterator, FusedIterator<LsmIterator>>,
     ) -> Result<Self> {
+        while iter.is_valid() && iter.value().is_empty() {
+            iter.next()?;
+        }
         Ok(Self {
             txn: txn.clone(),
             iter,
@@ -202,6 +253,12 @@ impl StorageIterator for TxnIterator {
         self.iter.next()?;
         while self.iter.is_valid() && self.iter.value().is_empty() {
             self.iter.next()?
+        }
+        if let Some(key_hashes) = self.txn.key_hashes.as_ref() {
+            if self.iter.is_valid() {
+                let mut guard = key_hashes.lock();
+                guard.1.insert(farmhash::fingerprint32(self.iter.key()));
+            }
         }
         Ok(())
     }
