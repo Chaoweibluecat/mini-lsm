@@ -38,7 +38,11 @@ impl Transaction {
 
         // 先从 local_storage 中查找
         if let Some(value) = self.local_storage.get(key).map(|e| e.value().clone()) {
-            return Ok(Some(value));
+            if value.is_empty() {
+                return Ok(None);
+            } else {
+                return Ok(Some(value));
+            }
         }
 
         // 如果 local_storage 中没有，则调用 inner.get_with_ts
