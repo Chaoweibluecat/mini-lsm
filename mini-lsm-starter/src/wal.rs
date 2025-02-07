@@ -68,16 +68,6 @@ impl Wal {
     }
 
     pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
-        // let mut guard = self.file.lock();
-        // let mut vec: Vec<u8> = vec![];
-        // vec.put_u16(key.key_len() as u16);
-        // vec.extend(key.key_ref());
-        // vec.put_u64(key.ts());
-        // vec.put_u16(value.len() as u16);
-        // vec.extend(value);
-        // let checksum = crc32fast::hash(&vec);
-        // vec.put_u32(checksum);
-        // assert_eq!(vec.len(), guard.get_mut().write(&vec)?);
         let mut key_bytes = key.key_ref().to_vec();
         key_bytes.put_u64(key.ts());
         self.put_batch(&vec![(&key_bytes[0..], value)])

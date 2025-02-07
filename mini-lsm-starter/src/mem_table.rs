@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use anyhow::{Ok, Result};
-use bytes::Bytes;
+use bytes::{BufMut, Bytes};
 use clap::builder;
 use crossbeam_skiplist::SkipMap;
 use ouroboros::self_referencing;
@@ -107,24 +107,33 @@ impl MemTable {
     /// In week 2, day 6, also flush the data to WAL.
     /// In week 3, day 5, modify the function to use the batch API.
     pub fn put(&self, key: KeySlice, value: &[u8]) -> Result<()> {
-        self.map.insert(
-            // map生命周期比入参长,这里是一定要拷贝的;不然put结束后bytes指针指向无效地址
-            key.to_key_vec().into_key_bytes(),
-            Bytes::copy_from_slice(value),
-        );
-        if let Some(wal) = self.wal.as_ref() {
-            wal.put(key, value)?;
-        }
-        self.approximate_size.fetch_add(
-            key.raw_len() + value.len(),
-            std::sync::atomic::Ordering::Relaxed,
-        );
-        Ok(())
+        self.put_batch(&vec![(key, value)])
     }
 
     /// Implement this in week 3, day 5.
     pub fn put_batch(&self, data: &[(KeySlice, &[u8])]) -> Result<()> {
-        unimplemented!()
+        let mut wal_input = vec![];
+        let mut size = 0;
+        for &(key, value) in data {
+            self.map.insert(
+            // map生命周期比入参长,这里是一定要拷贝的;不然put结束后bytes指针指向无效地址
+            key.to_key_vec().into_key_bytes(),
+            Bytes::copy_from_slice(value),
+        );
+        let mut wal_key = key.key_ref().to_vec();
+        wal_key.put_u64(key.ts());
+        wal_input.push((wal_key, value));
+        size += key.raw_len() + value.len();
+        }
+        let wal_input_ref = wal_input.iter().map(|kv| (&kv.0[0..], kv.1)).collect::<Vec<_>>();
+            if let Some(wal) = self.wal.as_ref() {
+            wal.put_batch(&wal_input_ref);
+        }
+        self.approximate_size.fetch_add(
+            size,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        Ok(())
     }
 
     pub fn sync_wal(&self) -> Result<()> {
