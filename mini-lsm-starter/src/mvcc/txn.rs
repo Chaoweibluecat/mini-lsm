@@ -108,7 +108,7 @@ impl Transaction {
             .insert(Bytes::copy_from_slice(key), Bytes::new());
     }
 
-    pub fn write_batch_inner(&self) -> Result<()> {
+    pub fn write_batch_inner(&self) -> Result<u64> {
         let iter = self.local_storage.iter();
         let mut batch_record = vec![];
         for entry in iter {
@@ -121,8 +121,7 @@ impl Transaction {
                 ));
             }
         }
-        self.inner.write_batch(&batch_record)?;
-        Ok(())
+        self.inner.write_batch_inner(&batch_record)
     }
     pub fn commit(&self) -> Result<()> {
         // enable serialize check
@@ -139,12 +138,16 @@ impl Transaction {
                     let any_conflict = commit_data
                         .key_hashes
                         .iter()
-                        .any(|hash| work_set.0.contains(hash));
+                        .any(|hash| work_set.1.contains(hash));
                     if any_conflict {
                         bail!("txn commit failed, conflict with previous txn");
                     }
                 }
-                txns.insert(
+            }
+            let expect =self.write_batch_inner()?;
+            let mut txns = self.inner.mvcc().committed_txns.lock();
+
+            txns.insert(
                     expect,
                     CommittedTxnData {
                         key_hashes: std::mem::replace(&mut work_set.0, HashSet::new()),
@@ -152,11 +155,9 @@ impl Transaction {
                         commit_ts: expect,
                     },
                 );
-            }
-
-            self.write_batch_inner()?;
         }
-        self.write_batch_inner()
+        self.write_batch_inner()?;
+        Ok(())
     }
 }
 
@@ -254,7 +255,7 @@ impl StorageIterator for TxnIterator {
         while self.iter.is_valid() && self.iter.value().is_empty() {
             self.iter.next()?
         }
-        if let Some(key_hashes) = self.txn.key_hashes.as_ref() {
+        if let Some(key_hashes) = &self.txn.key_hashes {
             if self.iter.is_valid() {
                 let mut guard = key_hashes.lock();
                 guard.1.insert(farmhash::fingerprint32(self.iter.key()));

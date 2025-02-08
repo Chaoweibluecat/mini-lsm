@@ -204,7 +204,7 @@ impl MiniLsm {
     }
 
     pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        self.inner.write_batch(batch)
+        self.inner.write_batch_inner(batch)
     }
 
     pub fn add_compaction_filter(&self, compaction_filter: CompactionFilter) {
@@ -483,7 +483,7 @@ impl LsmStorageInner {
     }
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
-    pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
+    pub fn write_batch_inner<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<u64> {
         if batch.is_empty() {
             return Ok(());
         }
@@ -517,19 +517,19 @@ impl LsmStorageInner {
         }
 
         self.mvcc.as_ref().unwrap().update_commit_ts(ts);
-        Ok(())
+        Ok(ts)
     }
 
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let record = WriteBatchRecord::Put(key, value);
-        self.write_batch(&vec![record])
+        self.write_batch_inner(&vec![record])
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
         let record: WriteBatchRecord<_> = WriteBatchRecord::Del(key);
-        self.write_batch(&vec![record])
+        self.write_batch_inner(&vec![record])
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
