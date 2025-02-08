@@ -147,15 +147,17 @@ impl Transaction {
                 }
             }
             let expect = self.write_batch_inner()?;
-            let mut txns = self.inner.mvcc().committed_txns.lock();
-            txns.insert(
-                expect,
-                CommittedTxnData {
-                    key_hashes: std::mem::replace(&mut work_set.0, HashSet::new()),
-                    read_ts: self.read_ts,
-                    commit_ts: expect,
-                },
-            );
+            if !work_set.0.is_empty() {
+                let mut txns = self.inner.mvcc().committed_txns.lock();
+                txns.insert(
+                    expect,
+                    CommittedTxnData {
+                        key_hashes: std::mem::replace(&mut work_set.0, HashSet::new()),
+                        read_ts: self.read_ts,
+                        commit_ts: expect,
+                    },
+                );
+            }
         }
         self.write_batch_inner()?;
         Ok(())
