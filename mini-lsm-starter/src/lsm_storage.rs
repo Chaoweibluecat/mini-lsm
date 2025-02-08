@@ -204,7 +204,22 @@ impl MiniLsm {
     }
 
     pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        self.inner.write_batch_inner(batch)?;
+        if !self.inner.options.serializable {
+            self.inner.write_batch_inner(batch)?;
+        } else {
+            let txn = self.inner.mvcc().new_txn(self.inner.clone(), true);
+            for record in batch {
+                match record {
+                    WriteBatchRecord::Del(k) => {
+                        txn.delete(k.as_ref());
+                    }
+                    WriteBatchRecord::Put(k, v) => {
+                        txn.put(k.as_ref(), v.as_ref());
+                    }
+                }
+            }
+            txn.commit()?;
+        }
         Ok(())
     }
 
@@ -217,11 +232,25 @@ impl MiniLsm {
     }
 
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
-        self.inner.put(key, value)
+        if !self.inner.options.serializable {
+            self.inner.put(key, value)?;
+        } else {
+            let txn = self.inner.mvcc().new_txn(self.inner.clone(), true);
+            txn.put(key, value);
+            txn.commit();
+        }
+        Ok(())
     }
 
     pub fn delete(&self, key: &[u8]) -> Result<()> {
-        self.inner.delete(key)
+        if !self.inner.options.serializable {
+            self.inner.delete(key)?;
+        } else {
+            let txn = self.inner.mvcc().new_txn(self.inner.clone(), true);
+            txn.delete(key);
+            txn.commit();
+        }
+        Ok(())
     }
 
     pub fn sync(&self) -> Result<()> {
@@ -418,8 +447,9 @@ impl LsmStorageInner {
     }
 
     pub fn get(self: &Arc<Self>, key: &[u8]) -> Result<Option<Bytes>> {
-        self.mvcc().new_txn(self.clone(), true).get(key)
+        self.mvcc().new_txn(self.clone(), self.options.serializable).get(key)
     }
+
     /// Get a key from the storage. In day 7, this can be further optimized by using a bloom filter.
     pub fn get_with_ts(&self, key: &[u8], read_ts: u64) -> Result<Option<Bytes>> {
         // memtable本身是lock-free的,但是这里首先还是需要获取state的读锁,
@@ -661,7 +691,7 @@ impl LsmStorageInner {
     }
     /// Create an iterator over a range of keys.
     pub fn scan(self: &Arc<Self>, lower: Bound<&[u8]>, upper: Bound<&[u8]>) -> Result<TxnIterator> {
-        let txn = self.mvcc().new_txn(self.clone(), true);
+        let txn = self.mvcc().new_txn(self.clone(), self.options.serializable);
         txn.scan(lower, upper)
     }
 

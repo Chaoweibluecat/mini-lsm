@@ -107,7 +107,7 @@ impl Transaction {
         self.local_storage
             .insert(Bytes::copy_from_slice(key), Bytes::new());
     }
-
+    
     pub fn write_batch_inner(&self) -> Result<u64> {
         let iter = self.local_storage.iter();
         let mut batch_record = vec![];
@@ -129,10 +129,9 @@ impl Transaction {
             let mut work_set = work_set.lock();
             let _lck = self.inner.mvcc().commit_lock.lock();
             if !work_set.0.is_empty() {
-                let expect = self.inner.mvcc().latest_commit_ts() + 1;
-                let mut txns = self.inner.mvcc().committed_txns.lock();
+                let txns = self.inner.mvcc().committed_txns.lock();
                 let intersect_txns =
-                    txns.range((Bound::Excluded(self.read_ts), Bound::Excluded(expect)));
+                    txns.range((Bound::Excluded(self.read_ts), Bound::Unbounded));
                 let committable = true;
                 for (_, commit_data) in intersect_txns {
                     let any_conflict = commit_data
@@ -152,12 +151,22 @@ impl Transaction {
                 txns.insert(
                     expect,
                     CommittedTxnData {
-                        key_hashes: std::mem::replace(&mut work_set.0, HashSet::new()),
+                        key_hashes: std::mem::take(&mut work_set.0),
                         read_ts: self.read_ts,
                         commit_ts: expect,
                     },
                 );
+                let watermark = self.inner.mvcc().watermark();
+                while let Some(entry) = txns.first_entry() {
+                    if *entry.key() < watermark {
+                        entry.remove();
+                    } else {
+                        break;
+                    }
+                }
             }
+        
+
         }
         self.write_batch_inner()?;
         Ok(())
