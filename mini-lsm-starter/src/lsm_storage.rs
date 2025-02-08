@@ -204,7 +204,8 @@ impl MiniLsm {
     }
 
     pub fn write_batch<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<()> {
-        self.inner.write_batch_inner(batch)
+        self.inner.write_batch_inner(batch)?;
+        Ok(())
     }
 
     pub fn add_compaction_filter(&self, compaction_filter: CompactionFilter) {
@@ -484,38 +485,38 @@ impl LsmStorageInner {
 
     /// Write a batch of data into the storage. Implement in week 2 day 7.
     pub fn write_batch_inner<T: AsRef<[u8]>>(&self, batch: &[WriteBatchRecord<T>]) -> Result<u64> {
-        if batch.is_empty() {
-            return Ok(());
-        }
         let _lock = self.mvcc.as_ref().unwrap().write_lock.lock();
         let ts = self.mvcc.as_ref().unwrap().latest_commit_ts() + 1;
-        let mut kvs: Vec<(KeySlice, &[u8])> = vec![];
-        for record in batch {
-            match record {
-                WriteBatchRecord::Del(key) => {
-                    kvs.push((KeySlice::from_slice(key.as_ref(), ts), &[]));
-                }
-                WriteBatchRecord::Put(key, value) => {
-                    kvs.push((KeySlice::from_slice(key.as_ref(), ts), value.as_ref()));
-                }
-            };
-        }
-        let size = {
-            let guard = self.state.read();
-            guard.memtable.put_batch(&kvs);
-            guard.memtable.approximate_size()
-        };
+        //支持一下读事务提交, 仅commit事务 & ts++,
+        if !batch.is_empty() {
+            let mut kvs: Vec<(KeySlice, &[u8])> = vec![];
 
-        if size > self.options.target_sst_size {
-            let state_lock = self.state_lock.lock();
-            // 进同步块以后state rwlock本身守护的对memtable的引用可能变了, 需要重新获取引用
-            let guard = self.state.read();
-            if guard.memtable.approximate_size() > self.options.target_sst_size {
-                drop(guard);
-                self.force_freeze_memtable(&state_lock)?;
+            for record in batch {
+                match record {
+                    WriteBatchRecord::Del(key) => {
+                        kvs.push((KeySlice::from_slice(key.as_ref(), ts), &[]));
+                    }
+                    WriteBatchRecord::Put(key, value) => {
+                        kvs.push((KeySlice::from_slice(key.as_ref(), ts), value.as_ref()));
+                    }
+                };
+            }
+            let size = {
+                let guard = self.state.read();
+                guard.memtable.put_batch(&kvs)?;
+                guard.memtable.approximate_size()
+            };
+
+            if size > self.options.target_sst_size {
+                let state_lock = self.state_lock.lock();
+                // 进同步块以后state rwlock本身守护的对memtable的引用可能变了, 需要重新获取引用
+                let guard = self.state.read();
+                if guard.memtable.approximate_size() > self.options.target_sst_size {
+                    drop(guard);
+                    self.force_freeze_memtable(&state_lock)?;
+                }
             }
         }
-
         self.mvcc.as_ref().unwrap().update_commit_ts(ts);
         Ok(ts)
     }
@@ -523,13 +524,15 @@ impl LsmStorageInner {
     /// Put a key-value pair into the storage by writing into the current memtable.
     pub fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
         let record = WriteBatchRecord::Put(key, value);
-        self.write_batch_inner(&vec![record])
+        self.write_batch_inner(&vec![record])?;
+        Ok(())
     }
 
     /// Remove a key from the storage by writing an empty value.
     pub fn delete(&self, key: &[u8]) -> Result<()> {
         let record: WriteBatchRecord<_> = WriteBatchRecord::Del(key);
-        self.write_batch_inner(&vec![record])
+        self.write_batch_inner(&vec![record])?;
+        Ok(())
     }
 
     pub(crate) fn path_of_sst_static(path: impl AsRef<Path>, id: usize) -> PathBuf {
