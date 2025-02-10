@@ -6,6 +6,7 @@ mod tiered;
 
 use std::collections::HashMap;
 use std::iter;
+use std::path::Prefix;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,7 +24,7 @@ use crate::iterators::merge_iterator::MergeIterator;
 use crate::iterators::two_merge_iterator::TwoMergeIterator;
 use crate::iterators::StorageIterator;
 use crate::key::{KeySlice, KeyVec};
-use crate::lsm_storage::{LsmStorageInner, LsmStorageState};
+use crate::lsm_storage::{CompactionFilter, LsmStorageInner, LsmStorageState};
 use crate::manifest::Manifest;
 use crate::table::{SsTable, SsTableBuilder, SsTableIterator};
 
@@ -117,11 +118,28 @@ pub enum CompactionOptions {
 }
 
 impl LsmStorageInner {
+    fn can_be_filtered(&self, filters: &Vec<CompactionFilter>, key: &[u8]) -> bool {
+        for filter in filters {
+            match filter {
+                CompactionFilter::Prefix(prefix) => {
+                    if key.starts_with(&prefix) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn compact_by_iter(
         &self,
         mut iter: impl for<'a> StorageIterator<KeyType<'a> = KeySlice<'a>>,
         bottom_level_included: bool,
     ) -> Result<Vec<Arc<SsTable>>> {
+        let filter = {
+            let guard = self.compaction_filters.lock();
+            (*guard).clone()
+        };
         let mut cur = SsTableBuilder::new(self.options.block_size);
         let mut result = vec![];
         let water_mark = self.mvcc().watermark();
@@ -139,7 +157,10 @@ impl LsmStorageInner {
                 cur_key.clear();
                 cur_key.extend(iter.key().key_ref());
             } else if !latest_key_under_watermark_added {
-                if !bottom_level_included || !iter.value().is_empty() {
+                if (!bottom_level_included || !iter.value().is_empty())
+                //移除的条件 1.不匹配compact_filter 2.compact到底层且最新版本被移除
+                    && !self.can_be_filtered(&filter, iter.key().key_ref())
+                {
                     cur.add(iter.key(), iter.value());
                 }
                 // reset current_key
@@ -158,7 +179,9 @@ impl LsmStorageInner {
                             cur.add(iter.key(), iter.value());
                             continue;
                         } else if !latest_key_under_watermark_added {
-                            if !bottom_level_included || !iter.value().is_empty() {
+                            if (!bottom_level_included || !iter.value().is_empty())
+                                && !self.can_be_filtered(&filter, iter.key().key_ref())
+                            {
                                 cur.add(iter.key(), iter.value());
                             }
                             latest_key_under_watermark_added = true;

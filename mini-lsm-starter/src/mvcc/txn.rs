@@ -147,6 +147,7 @@ impl Transaction {
                 }
             }
             let expect = self.write_batch_inner()?;
+            // 只有写事务需要被记录
             if !work_set.0.is_empty() {
                 let mut txns = self.inner.mvcc().committed_txns.lock();
                 txns.insert(
